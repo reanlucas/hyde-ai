@@ -10,6 +10,9 @@ cat <<'AVISO'
 +---------------------------------------------------------------+
 |  hyde-ai esta em BETA -- uso nao recomendado.                  |
 |  Instavel, com caminhos nao testados e API sujeita a mudar.    |
+|                                                               |
+|  O modo agente roda comandos na sua maquina e foi testado      |
+|  APENAS com o qwen3.5:9b. Vem desligado.                       |
 +---------------------------------------------------------------+
 AVISO
 sleep 2

@@ -3395,7 +3395,9 @@ class Sidebar(Gtk.ApplicationWindow):
                     "coisa que altere o sistema mostra o comando exato e "
                     "espera voce clicar em **Permitir**.\n\n"
                     "`/agente on` liga, `/agente off` desliga. Vale para o "
-                    "Ollama com modelos que suportam ferramentas." %
+                    "Ollama com modelos que suportam ferramentas.\n\n"
+                    "> Testado apenas com o `qwen3.5:9b`. Outros modelos "
+                    "deveriam funcionar, mas nao foram verificados." %
                     ("ligado" if ligado else "desligado"))
                 return True
             escolha = args[0].lower()

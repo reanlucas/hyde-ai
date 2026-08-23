@@ -17,6 +17,10 @@ Claude · Gemini · ChatGPT · Ollama local — todos com streaming.
 > Escrito para um setup específico e ainda instável: a interface tem arestas,
 > a API muda sem aviso e há caminhos não testados. Se for experimentar, espere
 > quebrar — e não conte com ele para nada importante.
+>
+> O **modo agente** foi testado só com o `qwen3.5:9b`. Qualquer outro modelo é
+> território desconhecido: ele roda comandos na sua máquina, e um modelo que
+> use as ferramentas de outro jeito pode se comportar de forma que eu não vi.
 
 ---
 
@@ -198,6 +202,13 @@ boot, e o coletor não encontra mais o sensor.
 **Desligado por padrão.** O botão de terminal ao lado do envio liga, ou
 `/agente on`. Só o Ollama, com modelos que anunciam `tools` — o `ollama show`
 mostra quais.
+
+> [!CAUTION]
+> Testado **apenas com o `qwen3.5:9b`**. Outros modelos anunciam `tools` e
+> deveriam funcionar, mas não verifiquei nenhum. O portão de permissão vale
+> para todos — ele olha o comando, não o modelo — mas a forma como cada um
+> encadeia chamadas, insiste depois de uma recusa ou interpreta a saída é
+> comportamento que eu não vi. Comece com pedidos de leitura.
 
 ### O que ele pode rodar sozinho
 
