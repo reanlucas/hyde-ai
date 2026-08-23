@@ -2913,6 +2913,18 @@ class Sidebar(Gtk.ApplicationWindow):
     # ------------------------------------------------------------------
     # Sending / streaming
     # ------------------------------------------------------------------
+    def ask(self, text):
+        """Fill the input with `text` and send it, as if the user had typed it.
+
+        Used by `hyde-ai --ask`, so a keybind or script can hand the panel a
+        question directly.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        self._set_input_text(text)
+        GLib.idle_add(self._submit)
+
     def _submit(self):
         if self._cancel is not None:
             return

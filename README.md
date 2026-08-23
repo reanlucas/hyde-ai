@@ -26,11 +26,10 @@ Fórmulas passam pelo `mathtext` do matplotlib, um parser TeX completo, e saem
 em **SVG rasterizado na densidade real da tela** — nítidas em qualquer escala.
 
 <div align="center">
-  <img src="docs/matematica.png" width="380" alt="Fórmulas renderizadas">
+  <img src="docs/matematica.png" width="400" alt="Rendered formulas: a Gaussian integral with limits, a stacked fraction, a nested square root and a boxed result, all typeset in the STIX font">
+  <p><em>Stacked fractions, integrals with limits, radicands under the bar.
+  STIX &mdash; the font used in scientific publishing.</em></p>
 </div>
-
-Frações empilhadas, integrais com limites, raízes com radicando sob o traço.
-Fonte STIX, o padrão de publicação científica.
 
 Equações longas são quebradas nos sinais de relação, como o ambiente `align`
 do LaTeX — sem isso viravam uma faixa larga com rolagem horizontal.
@@ -113,6 +112,9 @@ você escreve.
 | `/velocidade` | tokens/s médio por modelo |
 | `/refresh` | reprocura provedores e modelos |
 | `/side left\|right` · `/width 35` | geometria do painel |
+
+Da linha de comando, `hyde-ai --ask "sua pergunta"` abre o painel e envia a
+pergunta direto — dá para pendurar num atalho ou chamar de um script.
 
 ---
 

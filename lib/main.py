@@ -1052,7 +1052,16 @@ class HydeAiApplication(Adw.Application):
     def do_command_line(self, command_line):
         argv = command_line.get_arguments() or []
         verb = "toggle"
-        for arg in argv[1:]:
+        payload = None
+        rest = list(argv[1:])
+        if rest and rest[0].strip().lower() in ("--ask", "ask"):
+            payload = " ".join(rest[1:]).strip()
+            if not payload:
+                command_line.printerr_literal("hyde-ai: --ask needs a question\n")
+                return 2
+            self._dispatch("ask", payload)
+            return 0
+        for arg in rest:
             arg = arg.strip().lower()
             if arg in ("--toggle", "-t", "toggle"):
                 verb = "toggle"
@@ -1143,7 +1152,7 @@ class HydeAiApplication(Adw.Application):
             )
         return self.window
 
-    def _dispatch(self, verb):
+    def _dispatch(self, verb, payload=None):
         if verb == "quit":
             self.quit()
             return
@@ -1173,6 +1182,9 @@ class HydeAiApplication(Adw.Application):
         elif verb == "new":
             window.new_conversation()
             window.show_panel()
+        elif verb == "ask":
+            window.show_panel()
+            window.ask(payload)
         elif verb == "daemon":
             pass          # the window exists but stays hidden
 

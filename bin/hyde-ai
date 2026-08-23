@@ -681,6 +681,17 @@ def cmd_new(args) -> int:
     return launch(["--new"], use_systemd=args.systemd)
 
 
+def cmd_ask(args) -> int:
+    """Show the sidebar and send a question, as if it had been typed."""
+    question = " ".join(args.ask_text).strip()
+    if not question:
+        print("%s: --ask needs a question" % PROG, file=sys.stderr)
+        return 2
+    # The command line is forwarded to the primary instance when one is
+    # already running, so this both starts and drives the panel.
+    return launch(["--ask", question], use_systemd=args.systemd)
+
+
 def cmd_hide(args) -> int:
     if not is_running():
         return 0          # already hidden, by virtue of not existing
@@ -1167,6 +1178,10 @@ def build_parser() -> argparse.ArgumentParser:
                       help="ask the running sidebar to exit")
     mode.add_argument("--new", dest="mode", action="store_const", const="new",
                       help="start a fresh conversation, then show the sidebar")
+    mode.add_argument("--ask", dest="mode", action="store_const", const="ask",
+                      help="show the sidebar and send the given question")
+    parser.add_argument("ask_text", nargs="*", metavar="TEXT",
+                        help="the question, when --ask is used")
     mode.add_argument("--restart", dest="mode", action="store_const", const="restart",
                       help="quit the sidebar, then start it again")
     parser.add_argument("--side", dest="side_value", metavar="left|right",
@@ -1296,6 +1311,7 @@ COMMANDS = {
     "hide": cmd_hide,
     "quit": cmd_quit,
     "new": cmd_new,
+    "ask": cmd_ask,
     "restart": cmd_restart,
     "daemon": cmd_daemon,
     "status": cmd_status,
