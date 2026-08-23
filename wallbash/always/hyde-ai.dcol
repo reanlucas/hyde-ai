@@ -1,0 +1,276 @@
+${cacheDir}/wallbash/hyde-ai.css|${WALLBASH_SCRIPTS}/hyde-ai.sh
+
+/* ─────────────────────────────────────────────────────────────────────────
+   hyde-ai -- folha de estilo gerada pelo wallbash.
+   ASCII only: caractere fora de ASCII faz o grass emitir @charset, que o
+   parser CSS do GTK rejeita, derrubando TODO o estilo.
+
+   SISTEMA DE DESIGN
+   Escala de tipos (4 degraus, nao 7 tamanhos avulsos):
+       11px  meta      rotulos, horarios, dicas
+       13px  apoio     texto secundario, celula de tabela
+       15px  corpo     leitura principal
+       18px  titulo    cabecalhos
+   Ritmo de espacamento, base 4:  4 / 8 / 12 / 16 / 24
+   Hierarquia por opacidade, nao por cor nova:
+       1.00 primario | 0.70 secundario | 0.45 terciario | 0.25 desativado
+   ───────────────────────────────────────────────────────────────────────── */
+
+@define-color ha_bg          #<wallbash_pry1>;
+@define-color ha_layer1      #<wallbash_1xa1>;
+@define-color ha_layer2      #<wallbash_1xa2>;
+@define-color ha_layer3      #<wallbash_1xa3>;
+@define-color ha_border      #<wallbash_1xa4>;
+@define-color ha_fg          #<wallbash_txt1>;
+@define-color ha_link        #<wallbash_1xa7>;
+@define-color ha_accent      #<wallbash_4xa9>;
+@define-color ha_accent_alt  #<wallbash_4xa8>;
+@define-color ha_accent_low  #<wallbash_4xa2>;
+@define-color ha_on_accent   #<wallbash_4xa1>;
+@define-color ha_error       #<wallbash_2xa9>;
+@define-color ha_error_bg    #<wallbash_2xa2>;
+@define-color ha_ok          #<wallbash_3xa9>;
+
+@define-color ha_fg_muted    alpha(@ha_fg, 0.70);
+@define-color ha_fg_faint    alpha(@ha_fg, 0.45);
+@define-color ha_fg_ghost    alpha(@ha_fg, 0.25);
+
+/* ── base ──────────────────────────────────────────────────────────────── */
+window, window.background { background-color: transparent; }
+
+.panel, .hyde-ai-root {
+  background-color: alpha(@ha_bg, 0.97);
+  color: @ha_fg;
+  border: 1px solid alpha(@ha_border, 0.55);
+  border-radius: 20px;
+  font-family: "CaskaydiaCove Nerd Font Mono", "JetBrainsMono Nerd Font", monospace;
+  font-size: 15px;
+}
+
+/* ── cabecalho ─────────────────────────────────────────────────────────── */
+.header       { padding: 8px 4px; min-height: 34px; }
+.header-title { font-size: 13px; font-weight: 700; color: @ha_fg_muted; }
+
+/* ── conversa ──────────────────────────────────────────────────────────── */
+.chat { background-color: transparent; }
+
+/* respiro entre turnos maior que dentro do turno: agrupa a leitura */
+.msg {
+  border-radius: 16px;
+  padding: 12px;
+  margin: 8px 4px;
+}
+.msg-user {
+  background-color: alpha(@ha_accent_low, 0.20);
+  border: 1px solid alpha(@ha_accent, 0.22);
+  margin-left: 48px;
+}
+.msg-assistant {
+  background-color: alpha(@ha_layer1, 0.20);
+  border: 1px solid alpha(@ha_border, 0.20);
+}
+
+.msg-header { background-color: transparent; padding: 0; min-height: 18px; }
+.msg-name   { font-size: 11px; font-weight: 600; color: @ha_fg_faint; }
+.msg-icon   { color: @ha_fg_ghost; -gtk-icon-size: 12px; }
+.msg-metricas { font-size: 11px; color: @ha_fg_ghost; }
+.msg-body   { background-color: transparent; }
+.msg-text, .md-text, .md {
+  font-size: 15px;
+  color: @ha_fg;
+}
+.msg-error {
+  background-color: alpha(@ha_error_bg, 0.45);
+  border: 1px solid alpha(@ha_error, 0.40);
+  color: @ha_error;
+}
+
+/* acoes aparecem no hover: nao competem com a leitura */
+.msg-actions { opacity: 0; transition: opacity 120ms ease-out; }
+.msg:hover .msg-actions, .msg-actions:focus-within { opacity: 1; }
+.msg-actions button {
+  background: none; border: none; box-shadow: none;
+  color: @ha_fg_ghost; min-width: 22px; min-height: 22px;
+  border-radius: 8px;
+}
+.msg-actions button:hover  { background-color: alpha(@ha_accent, 0.16); color: @ha_fg; }
+.msg-actions button:active { background-color: alpha(@ha_accent, 0.28); }
+
+/* ── raciocinio ────────────────────────────────────────────────────────── */
+.think {
+  background-color: alpha(@ha_layer1, 0.28);
+  border: 1px solid alpha(@ha_border, 0.22);
+  border-radius: 12px;
+  padding: 8px 12px;
+  margin: 4px 0;
+}
+.think-header { font-size: 11px; font-weight: 600; color: @ha_fg_faint; }
+.think-body   { font-size: 13px; color: @ha_fg_faint; }
+
+/* ── codigo ────────────────────────────────────────────────────────────── */
+.code-block {
+  background-color: alpha(@ha_bg, 0.92);
+  border: 1px solid alpha(@ha_border, 0.35);
+  border-radius: 12px;
+  margin: 8px 0;
+  font-family: "CaskaydiaCove Nerd Font Mono", monospace;
+  font-size: 13px;
+}
+.code-header {
+  background-color: transparent;
+  color: @ha_fg_ghost;
+  border: none;
+  padding: 4px 12px 0 12px;
+  min-height: 16px;
+  font-size: 11px;
+}
+.code-lang   { font-size: 11px; color: @ha_fg_ghost; font-weight: 600; }
+.code-scroll { background-color: transparent; }
+.code-view, .code-view text, .code-block textview, .code-block text {
+  background-color: transparent;
+  color: @ha_fg;
+  font-family: "CaskaydiaCove Nerd Font Mono", monospace;
+  font-size: 13px;
+}
+.code-block gutter, .code-block .left-gutter {
+  background-color: transparent;
+  color: @ha_fg_ghost;
+}
+.code-copy {
+  background: none; border: none; color: @ha_fg_ghost;
+  opacity: 0; transition: opacity 120ms ease-out;
+  border-radius: 8px; min-width: 22px; min-height: 22px;
+}
+.code-block:hover .code-copy, .code-copy:focus { opacity: 1; }
+.code-copy:hover { background-color: alpha(@ha_accent, 0.16); color: @ha_fg; }
+
+/* ── matematica ────────────────────────────────────────────────────────── */
+.math-block        { margin: 8px 4px; border-radius: 10px; padding: 2px; }
+.math-block:hover  { background-color: alpha(@ha_accent, 0.10); }
+.math-copiada      { background-color: alpha(@ha_ok, 0.22); }
+.math-fonte {
+  font-family: "CaskaydiaCove Nerd Font Mono", monospace;
+  font-size: 11px;
+  color: @ha_fg_faint;
+  padding: 4px 6px;
+}
+
+/* ── tabelas ───────────────────────────────────────────────────────────── */
+.md-table { margin: 8px 0; }
+.md-table .td, .md-table .td-head {
+  padding: 6px 12px;
+  border-bottom: 1px solid alpha(@ha_border, 0.20);
+  font-size: 13px;
+}
+.md-table .td-head {
+  color: @ha_fg;
+  font-weight: 700;
+  border-bottom: 2px solid alpha(@ha_accent, 0.40);
+}
+.md-table .td     { color: @ha_fg_muted; }
+.md-table .td-alt { background-color: alpha(@ha_layer1, 0.22); }
+
+/* ── entrada ───────────────────────────────────────────────────────────── */
+.input-area  { padding: 8px 4px 4px 4px; }
+.input-frame {
+  background-color: alpha(@ha_layer1, 0.35);
+  border: 1px solid alpha(@ha_border, 0.35);
+  border-radius: 14px;
+  padding: 4px;
+}
+.input-frame:focus-within { border-color: alpha(@ha_accent, 0.55); }
+.input, .input text, .input textview, .input textview > text {
+  background-color: transparent;
+  color: @ha_fg;
+  font-size: 15px;
+  caret-color: @ha_accent;
+}
+.input-placeholder { color: @ha_fg_ghost; font-size: 15px; }
+.input-controls    { background-color: transparent; padding: 0 4px 2px 4px; }
+.input-status      { font-size: 11px; color: @ha_fg_ghost; }
+
+.send-btn, .stop-btn {
+  border-radius: 999px; min-width: 28px; min-height: 28px;
+  border: none; background: none;
+}
+.send-btn           { color: @ha_accent; }
+.send-btn:hover     { background-color: alpha(@ha_accent, 0.18); }
+.send-btn:disabled  { color: @ha_fg_ghost; }
+.stop-btn           { color: @ha_error; }
+.stop-btn:hover     { background-color: alpha(@ha_error, 0.18); }
+
+/* ── seletores ─────────────────────────────────────────────────────────── */
+.selector, .chip {
+  background: none; border: none;
+  color: @ha_fg_muted; font-size: 13px;
+  padding: 2px 8px; border-radius: 8px;
+}
+.selector:hover, .chip:hover { background-color: alpha(@ha_accent, 0.16); color: @ha_fg; }
+.selector-label { font-size: 13px; color: @ha_fg_muted; }
+.selector-popover > contents, .selector-popover contents {
+  min-width: 320px;
+  background-color: alpha(@ha_layer2, 0.98);
+  border: 1px solid alpha(@ha_border, 0.55);
+  border-radius: 14px;
+  color: @ha_fg;
+  padding: 4px;
+}
+.selector-list       { background-color: transparent; }
+.selector-row        { border-radius: 8px; min-height: 34px; background-color: transparent; }
+.selector-row:hover  { background-color: alpha(@ha_accent, 0.16); }
+.selector-row-title  { font-size: 13px; color: @ha_fg; }
+.selector-row-sub    { font-size: 11px; color: @ha_fg_faint; }
+
+/* ── avisos e estado vazio ─────────────────────────────────────────────── */
+.banner {
+  background-color: alpha(@ha_accent_low, 0.35);
+  border: 1px solid alpha(@ha_accent, 0.30);
+  border-radius: 12px;
+  padding: 8px 12px;
+  margin: 4px;
+}
+.banner-label      { font-size: 13px; color: @ha_fg_muted; }
+.placeholder       { background-color: transparent; }
+.placeholder-title { font-size: 18px; font-weight: 700; color: @ha_fg_muted; }
+.placeholder-body  { font-size: 13px; color: @ha_fg_ghost; }
+.placeholder-icon  { color: alpha(@ha_accent, 0.55); -gtk-icon-size: 40px; }
+
+/* ── utilitarios ───────────────────────────────────────────────────────── */
+.dim, .hint  { color: @ha_fg_faint; }
+.streaming   { color: @ha_accent; }
+.icon-btn, .flat {
+  background: none; border: none; color: @ha_fg_faint;
+  border-radius: 8px; min-width: 26px; min-height: 26px;
+}
+.icon-btn:hover, .flat:hover { background-color: alpha(@ha_accent, 0.16); color: @ha_fg; }
+.scroll-bottom {
+  background-color: alpha(@ha_layer3, 0.92);
+  border: 1px solid alpha(@ha_border, 0.45);
+  border-radius: 999px; color: @ha_fg;
+}
+.scroll-bottom:hover { background-color: @ha_accent; color: @ha_on_accent; }
+
+/* ── barras de rolagem ─────────────────────────────────────────────────── */
+scrollbar { background-color: transparent; border: none; }
+/* sem margem no trough: ela era subtraida do slider e gerava
+   largura negativa (GtkGizmo reported min width -8) */
+scrollbar trough { background-color: transparent; border: none; }
+scrollbar slider {
+  background-color: alpha(@ha_fg, 0.20);
+  border: none; border-radius: 999px;
+  transition: background-color 140ms ease;
+}
+scrollbar.vertical slider   { min-width: 8px; min-height: 40px; }
+scrollbar.horizontal slider { min-height: 8px; min-width: 40px; }
+scrollbar slider:hover  { background-color: alpha(@ha_accent, 0.55); }
+scrollbar slider:active { background-color: @ha_accent; }
+
+.panel scrolledwindow, .panel textview, .panel textview > text {
+  background-color: transparent;
+}
+tooltip.background {
+  background-color: alpha(@ha_bg, 0.96);
+  border: 1px solid alpha(@ha_border, 0.55);
+  border-radius: 10px;
+  color: @ha_fg;
+}

@@ -1,0 +1,1337 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+hyde-ai — launcher, toggle entrypoint and setup tool for the HyDE AI sidebar.
+
+This file is deliberately dependency-free at import time: it imports only the
+Python standard library up front, so --version, --help, --doctor and --setup
+keep working on a machine where PyGObject or gtk4-layer-shell is broken or
+missing. PyGObject is imported lazily, and only for the D-Bus calls used to
+talk to an already-running sidebar.
+
+Single-instance model
+---------------------
+The sidebar is a Gtk.Application with a fixed application_id, so GIO owns a
+well-known name for it on the session bus and a second process can never
+create a second window. This launcher therefore:
+
+  * asks the session bus whether that name has an owner;
+  * if it does, activates the running instance's exported GAction over
+    org.gtk.Actions -- no .desktop file and no `gapplication` binary needed;
+  * if it does not, spawns the sidebar detached and lets it show itself.
+
+The contract the Python package must honour is written out in
+~/.local/lib/hyde-ai/README.md under "Launcher contract".
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+# --------------------------------------------------------------------------- #
+# Constants
+# --------------------------------------------------------------------------- #
+
+PROG = "hyde-ai"
+VERSION = "1.0.0"
+
+HOME = os.path.expanduser("~")
+
+
+def _xdg(var: str, default: str) -> str:
+    value = os.environ.get(var, "").strip()
+    return value if value else os.path.join(HOME, default)
+
+
+XDG_CONFIG_HOME = _xdg("XDG_CONFIG_HOME", ".config")
+XDG_CACHE_HOME = _xdg("XDG_CACHE_HOME", ".cache")
+XDG_STATE_HOME = _xdg("XDG_STATE_HOME", ".local/state")
+
+LIB_DIR = os.environ.get("HYDE_AI_LIB") or os.path.join(HOME, ".local/lib/hyde-ai")
+CONFIG_DIR = os.path.join(XDG_CONFIG_HOME, "hyde-ai")
+CONFIG_FILE = os.environ.get("HYDE_AI_CONFIG") or os.path.join(CONFIG_DIR, "config.json")
+STATE_DIR = os.path.join(XDG_STATE_HOME, "hyde-ai")
+CACHE_DIR = os.path.join(XDG_CACHE_HOME, "hyde-ai")
+HISTORY_FILE = os.path.join(STATE_DIR, "history.json")
+LOG_FILE = os.path.join(STATE_DIR, "hyde-ai.log")
+SNIPPET_FILE = os.path.join(CONFIG_DIR, "hyprland-snippet.lua")
+
+# Where HyDE's wallbash renderer drops our stylesheet. Note the explicit
+# `hyde-ai` name: `sidebar.css` is already taken in that directory.
+WALLBASH_CSS = os.path.join(XDG_CACHE_HOME, "hyde", "wallbash", "hyde-ai.css")
+WALLBASH_TEMPLATE = os.path.join(
+    XDG_CONFIG_HOME, "hyde", "wallbash", "always", "hyde-ai.dcol"
+)
+
+APP_ID = os.environ.get("HYDE_AI_APP_ID") or "dev.hyde.HydeAi"
+
+# The layer-shell namespace the sidebar passes to gtk_layer_set_namespace().
+# Hyprland layer rules match on this and `hyprctl layers` shows it.
+LAYER_NAMESPACE = "hyde-ai"
+
+SYSTEMD_UNIT = "hyde-ai.service"
+
+# Candidate entry points inside LIB_DIR, most specific first. This tolerates
+# any reasonable layout without guessing. sidebar.py is deliberately NOT a
+# candidate: it refuses to run directly and exits 2.
+ENTRY_CANDIDATES = (
+    ("hyde_ai/__main__.py", lambda py, lib, path: [py, "-m", "hyde_ai"]),
+    ("__main__.py", lambda py, lib, path: [py, lib]),
+    ("main.py", lambda py, lib, path: [py, path]),
+    ("hyde_ai.py", lambda py, lib, path: [py, path]),
+    ("app.py", lambda py, lib, path: [py, path]),
+)
+
+# Providers, mirroring providers.py. `env_vars` is in the same precedence
+# order the provider layer uses: config.json first, then these in order.
+PROVIDERS = (
+    {
+        "id": "anthropic",
+        "name": "Claude",
+        "env_vars": ("ANTHROPIC_API_KEY",),
+        "key_url": "https://console.anthropic.com/settings/keys",
+        "models": ("claude-opus-5", "claude-sonnet-5",
+                   "claude-fable-5", "claude-haiku-4-5"),
+        "default_model": "claude-opus-5",
+    },
+    {
+        "id": "gemini",
+        "name": "Gemini",
+        "env_vars": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+        "key_url": "https://aistudio.google.com/apikey",
+        "models": ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
+                   "gemini-3.5-flash-lite", "gemini-3.1-pro-preview",
+                   "gemini-2.5-pro", "gemini-2.5-flash"),
+        "default_model": "gemini-3.7-flash",
+    },
+    {
+        "id": "openai",
+        "name": "ChatGPT",
+        "env_vars": ("OPENAI_API_KEY",),
+        "key_url": "https://platform.openai.com/api-keys",
+        "models": ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+                   "gpt-5.5", "gpt-5.4"),
+        "default_model": "gpt-5.6-sol",
+    },
+    {
+        "id": "ollama",
+        "name": "Ollama",
+        "env_vars": ("OLLAMA_API_KEY",),   # only needed for Ollama Cloud
+        "key_url": "https://ollama.com/settings/keys",
+        "models": (),                       # discovered from the daemon
+        "default_model": "",
+    },
+)
+
+PROVIDER_BY_ID = {p["id"]: p for p in PROVIDERS}
+
+DEFAULT_OLLAMA_URL = "http://localhost:11434"
+
+
+# --------------------------------------------------------------------------- #
+# Small helpers
+# --------------------------------------------------------------------------- #
+
+def _isatty() -> bool:
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def _colour(code: str, text: str) -> str:
+    try:
+        if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+            return text
+    except Exception:
+        return text
+    return "\033[%sm%s\033[0m" % (code, text)
+
+
+def bold(t: str) -> str:
+    return _colour("1", t)
+
+
+def green(t: str) -> str:
+    return _colour("32", t)
+
+
+def yellow(t: str) -> str:
+    return _colour("33", t)
+
+
+def red(t: str) -> str:
+    return _colour("31", t)
+
+
+def dim(t: str) -> str:
+    return _colour("2", t)
+
+
+def ensure_dirs() -> None:
+    for path, mode in (
+        (CONFIG_DIR, 0o700),
+        (STATE_DIR, 0o700),
+        (CACHE_DIR, 0o700),
+        (os.path.dirname(WALLBASH_CSS), 0o755),
+    ):
+        try:
+            os.makedirs(path, mode=mode, exist_ok=True)
+        except OSError:
+            pass
+
+
+def log(message: str) -> None:
+    """Append a timestamped line to the state log, best effort."""
+    try:
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        try:
+            if os.path.getsize(LOG_FILE) > 1024 * 1024:
+                with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as handle:
+                    tail = handle.read()[-256 * 1024:]
+                with open(LOG_FILE, "w", encoding="utf-8") as handle:
+                    handle.write(tail)
+        except OSError:
+            pass
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(LOG_FILE, "a", encoding="utf-8") as handle:
+            handle.write("[%s] %s\n" % (stamp, message))
+    except OSError:
+        pass
+
+
+def notify(summary: str, body: str, urgency: str = "critical") -> None:
+    """Desktop notification: when we were started from a keybind there is no
+    terminal for an error message to land in."""
+    if not shutil.which("notify-send"):
+        return
+    try:
+        subprocess.Popen(
+            ["notify-send", "-a", PROG, "-u", urgency,
+             "-i", "dialog-information", summary, body],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
+
+
+def die(message: str, hint: str = "", code: int = 1):
+    """Exit with a human-readable error. Never a traceback."""
+    indented = "\n".join("  " + line for line in hint.splitlines())
+    text = message if not hint else "%s\n%s" % (message, indented)
+    print("%s: %s" % (red(PROG + ": error"), text), file=sys.stderr)
+    log("ERROR %s | %s" % (message, hint.replace("\n", " ")))
+    try:
+        interactive = sys.stderr.isatty()
+    except Exception:
+        interactive = False
+    if not interactive:
+        notify("hyde-ai failed to start", message + (("\n" + hint) if hint else ""))
+    sys.exit(code)
+
+
+def atomic_write(path: str, data: str, mode: int = 0o600) -> None:
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    tmp = os.path.join(directory, ".%s.tmp.%d" % (os.path.basename(path), os.getpid()))
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
+#
+# The schema is owned by the sidebar (see ~/.local/lib/hyde-ai/config.py,
+# DEFAULTS). This launcher only ever writes the handful of keys --setup asks
+# about, merged onto whatever is already on disk, so it can never reset a
+# setting the sidebar wrote and can never introduce a key the sidebar does not
+# understand.
+#
+# API keys are plain strings. An empty string means "not set here", and the
+# provider then falls back to its environment variable. There is no `env:` or
+# `keyring:` indirection -- the provider layer does not implement one, and
+# writing such a value would be read back as a literal (broken) key.
+
+def read_config() -> dict:
+    """Return config.json exactly as it is on disk ({} if absent/unreadable)."""
+    if not os.path.exists(CONFIG_FILE):
+        return {}
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict):
+            raise ValueError("the top level of config.json must be an object")
+        return data
+    except (OSError, ValueError) as exc:
+        print(yellow("%s: warning: could not read %s (%s)" % (PROG, CONFIG_FILE, exc)),
+              file=sys.stderr)
+        return {}
+
+
+def cfg_get(config: dict, dotted: str, default=None):
+    """Dotted lookup, matching config.py's Config.get()."""
+    node = config
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return default
+        node = node[part]
+    return node
+
+
+def cfg_set(config: dict, dotted: str, value) -> None:
+    parts = dotted.split(".")
+    node = config
+    for part in parts[:-1]:
+        nxt = node.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            node[part] = nxt
+        node = nxt
+    node[parts[-1]] = value
+
+
+def write_config(config: dict) -> None:
+    """Persist config.json at mode 0600 -- it can hold API keys."""
+    atomic_write(CONFIG_FILE, json.dumps(config, indent=2, ensure_ascii=False) + "\n",
+                 0o600)
+
+
+def stored_key(config: dict, provider_id: str) -> str:
+    value = cfg_get(config, "api_keys.%s" % provider_id, "")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def env_key(provider: dict) -> "tuple[str, str]":
+    """Return (variable_name, value) for the first env var that is set."""
+    for var in provider["env_vars"]:
+        value = os.environ.get(var, "").strip()
+        if value:
+            return var, value
+    return "", ""
+
+
+def describe_key(config: dict, provider: dict) -> str:
+    """Human description of a provider's credential. Never prints the secret."""
+    value = stored_key(config, provider["id"])
+    if value:
+        return green("set in config.json (%d chars, ends %s)"
+                     % (len(value), value[-4:] if len(value) >= 4 else "****"))
+    var, _ = env_key(provider)
+    if var:
+        return green("from $%s" % var)
+    if provider["id"] == "ollama":
+        return dim("none needed for a local daemon")
+    return dim("not set")
+
+
+def provider_usable(config: dict, provider: dict) -> bool:
+    if provider["id"] == "ollama":
+        # Reachable but with nothing pulled is not usable for a chat.
+        return bool(detect_ollama_models(cfg_get(config, "ollama.base_url",
+                                                 DEFAULT_OLLAMA_URL)))
+    return bool(stored_key(config, provider["id"]) or env_key(provider)[1])
+
+
+def detect_ollama_models(base_url: str):
+    """Locally pulled Ollama models, or None if the daemon is unreachable."""
+    url = (base_url or DEFAULT_OLLAMA_URL).rstrip("/")
+    try:
+        import urllib.request
+        with urllib.request.urlopen(url + "/api/tags", timeout=1.5) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+        return [m.get("name", "") for m in payload.get("models", []) if m.get("name")]
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Entry point discovery
+# --------------------------------------------------------------------------- #
+
+def find_entry():
+    """Return (argv, path) for launching the sidebar, or None."""
+    python = sys.executable or shutil.which("python3") or "/usr/bin/python3"
+
+    override = os.environ.get("HYDE_AI_ENTRY", "").strip()
+    if override:
+        if not os.path.exists(override):
+            return None
+        return ([python, override], override)
+
+    if not os.path.isdir(LIB_DIR):
+        return None
+
+    for rel, build in ENTRY_CANDIDATES:
+        path = os.path.join(LIB_DIR, rel)
+        if os.path.exists(path):
+            return (build(python, LIB_DIR, path), path)
+    return None
+
+
+CHILD_ENV_KEYS = (
+    "PYTHONPATH", "PYTHONUNBUFFERED", "HYDE_AI_LIB", "HYDE_AI_CONFIG",
+    "HYDE_AI_APP_ID", "HYDE_AI_STATE", "HYDE_AI_CACHE", "HYDE_AI_CSS",
+    "HYDE_AI_NAMESPACE", "HYDE_AI_VERSION", "GDK_BACKEND",
+)
+
+
+def child_env() -> dict:
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(
+        [LIB_DIR] + [p for p in existing.split(os.pathsep) if p])
+    env["PYTHONUNBUFFERED"] = "1"
+    env["HYDE_AI_LIB"] = LIB_DIR
+    env["HYDE_AI_CONFIG"] = CONFIG_FILE
+    env["HYDE_AI_APP_ID"] = APP_ID
+    env["HYDE_AI_STATE"] = STATE_DIR
+    env["HYDE_AI_CACHE"] = CACHE_DIR
+    env["HYDE_AI_CSS"] = WALLBASH_CSS
+    env["HYDE_AI_NAMESPACE"] = LAYER_NAMESPACE
+    env["HYDE_AI_VERSION"] = VERSION
+    # A layer-shell surface exists only on Wayland; never let GTK pick X11.
+    env["GDK_BACKEND"] = "wayland"
+    return env
+
+
+# --------------------------------------------------------------------------- #
+# D-Bus (lazy PyGObject import)
+# --------------------------------------------------------------------------- #
+
+def object_path_for(app_id: str) -> str:
+    """Reproduce GApplication's application_id -> object path mapping."""
+    return re.sub(r"[^A-Za-z0-9_/]", "_", "/" + app_id.replace(".", "/"))
+
+
+_BUS = None
+_BUS_TRIED = False
+
+
+def session_bus():
+    global _BUS, _BUS_TRIED
+    if _BUS_TRIED:
+        return _BUS
+    _BUS_TRIED = True
+    try:
+        import gi  # noqa: F401
+        from gi.repository import Gio
+        _BUS = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    except Exception as exc:
+        log("session bus unavailable: %r" % (exc,))
+        _BUS = None
+    return _BUS
+
+
+def is_running() -> bool:
+    bus = session_bus()
+    if bus is None:
+        return False
+    try:
+        from gi.repository import Gio, GLib
+        result = bus.call_sync(
+            "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+            "NameHasOwner", GLib.Variant("(s)", (APP_ID,)), GLib.VariantType("(b)"),
+            Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+        return bool(result.unpack()[0])
+    except Exception as exc:
+        log("NameHasOwner failed: %r" % (exc,))
+        return False
+
+
+def send_action(action: str) -> bool:
+    """Activate a GAction on the running instance. False if it did not land."""
+    bus = session_bus()
+    if bus is None:
+        return False
+    try:
+        from gi.repository import Gio, GLib
+        bus.call_sync(
+            APP_ID, object_path_for(APP_ID), "org.gtk.Actions", "Activate",
+            GLib.Variant("(sava{sv})", (action, [], {})), None,
+            Gio.DBusCallFlags.NO_AUTO_START, 5000, None)
+        log("sent action %s" % action)
+        return True
+    except Exception as exc:
+        log("action %s failed: %r" % (action, exc))
+        return False
+
+
+def wait_until(predicate, timeout: float = 5.0, interval: float = 0.1) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
+
+
+# --------------------------------------------------------------------------- #
+# Preflight
+# --------------------------------------------------------------------------- #
+
+def check_pygobject():
+    try:
+        import gi
+        return True, "PyGObject %s" % gi.__version__
+    except Exception as exc:
+        return False, str(exc)
+
+
+def check_typelib(namespace: str, want: str):
+    try:
+        import gi
+    except Exception as exc:
+        return False, "PyGObject unavailable (%s)" % exc
+    versions = []
+    try:
+        versions = list(gi.Repository.get_default().enumerate_versions(namespace))
+    except Exception:
+        versions = []
+    if not versions:
+        search = [p for p in os.environ.get("GI_TYPELIB_PATH", "").split(os.pathsep) if p]
+        search += ["/usr/lib/girepository-1.0", "/usr/lib64/girepository-1.0",
+                   "/usr/local/lib/girepository-1.0"]
+        for directory in search:
+            try:
+                names = os.listdir(directory)
+            except OSError:
+                continue
+            hits = [n for n in names
+                    if n.startswith(namespace + "-") and n.endswith(".typelib")]
+            if hits:
+                versions = sorted(h[len(namespace) + 1:-len(".typelib")] for h in hits)
+                break
+    if not versions:
+        return False, "%s typelib not found" % namespace
+    if want in versions:
+        return True, "%s-%s" % (namespace, want)
+    return False, "%s present but only version(s) %s (need %s)" % (
+        namespace, ", ".join(versions), want)
+
+
+def check_layer_shell_library():
+    try:
+        import ctypes
+        ctypes.CDLL("libgtk4-layer-shell.so.0")
+        return True, "libgtk4-layer-shell.so.0 loadable"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def preflight():
+    checks = []
+    checks.append(("python", sys.version_info >= (3, 9),
+                   "%d.%d.%d" % sys.version_info[:3]))
+    checks.append(("pygobject",) + check_pygobject())
+    for namespace, want in (("Gtk", "4.0"), ("Adw", "1"),
+                            ("Gtk4LayerShell", "1.0"), ("GtkSource", "5")):
+        ok, detail = check_typelib(namespace, want)
+        checks.append(("typelib:" + namespace, ok, detail))
+    checks.append(("libgtk4-layer-shell",) + check_layer_shell_library())
+    entry = find_entry()
+    checks.append(("package", entry is not None,
+                   entry[1] if entry else "no entry point under %s" % LIB_DIR))
+    return checks
+
+
+REQUIRED_CHECKS = {
+    "python", "pygobject", "typelib:Gtk", "typelib:Gtk4LayerShell",
+    "libgtk4-layer-shell", "package",
+}
+
+HINTS = {
+    "pygobject": "install it with:  sudo pacman -S python-gobject",
+    "typelib:Gtk": "install it with:  sudo pacman -S gtk4",
+    "typelib:Adw": "install it with:  sudo pacman -S libadwaita",
+    "typelib:Gtk4LayerShell": "install it with:  sudo pacman -S gtk4-layer-shell",
+    "typelib:GtkSource": "install it with:  sudo pacman -S gtksourceview5 "
+                         "(without it, code blocks lose syntax highlighting)",
+    "libgtk4-layer-shell": "install it with:  sudo pacman -S gtk4-layer-shell",
+    "package": "expected the sidebar package at %s "
+               "(or set HYDE_AI_LIB to where it lives)" % LIB_DIR,
+}
+
+
+def require_ready() -> None:
+    """Abort with a readable message if the sidebar cannot possibly start."""
+    for name, ok, detail in preflight():
+        if ok or name not in REQUIRED_CHECKS:
+            continue
+        die("%s is missing or unusable (%s)." % (name, detail),
+            HINTS.get(name, "run `hyde-ai --doctor` for the full picture"))
+
+
+# --------------------------------------------------------------------------- #
+# Launching
+# --------------------------------------------------------------------------- #
+
+def open_log_handle():
+    try:
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        return open(LOG_FILE, "a", buffering=1, encoding="utf-8", errors="replace")
+    except OSError:
+        return subprocess.DEVNULL
+
+
+def launch(extra_args, use_systemd: bool = False) -> int:
+    """Start the sidebar detached. Returns an exit code for the shell."""
+    require_ready()
+    ensure_dirs()
+
+    entry = find_entry()
+    if entry is None:          # require_ready already covers this; belt and braces
+        die("could not find the sidebar package under %s" % LIB_DIR, HINTS["package"])
+    argv, description = entry
+    argv = list(argv) + list(extra_args)
+    env = child_env()
+
+    if use_systemd:
+        if not shutil.which("systemd-run"):
+            die("--systemd was requested but systemd-run is not installed.",
+                "drop the flag and hyde-ai will spawn the sidebar directly")
+        unit_argv = [
+            "systemd-run", "--user",
+            "--unit=%s" % SYSTEMD_UNIT[:-len(".service")],
+            "--description=HyDE AI sidebar",
+            "--slice=background-graphical.slice",
+            "--collect", "--quiet",
+        ]
+        for key in CHILD_ENV_KEYS:
+            unit_argv.append("--setenv=%s=%s" % (key, env[key]))
+        unit_argv.append("--")
+        unit_argv.extend(argv)
+        log("launching via systemd-run: %s" % " ".join(argv))
+        try:
+            proc = subprocess.run(unit_argv, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            die("systemd-run failed: %s" % exc)
+        if proc.returncode != 0:
+            message = (proc.stderr or proc.stdout or "").strip() or "unknown error"
+            die("systemd-run could not start %s: %s" % (SYSTEMD_UNIT, message),
+                "try plain `hyde-ai --show`, or `systemctl --user status %s`"
+                % SYSTEMD_UNIT)
+        return 0
+
+    log("launching: %s" % " ".join(argv))
+    handle = open_log_handle()
+    try:
+        subprocess.Popen(
+            argv,
+            cwd=LIB_DIR if os.path.isdir(LIB_DIR) else HOME,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=handle,
+            stderr=handle,
+            start_new_session=True,   # setsid: outlives the keybind's shell
+            close_fds=True,
+        )
+    except OSError as exc:
+        die("could not start the sidebar (%s)" % exc,
+            "entry point was: %s" % description)
+    finally:
+        if handle is not subprocess.DEVNULL:
+            try:
+                handle.close()
+            except OSError:
+                pass
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Commands
+# --------------------------------------------------------------------------- #
+
+def cmd_toggle(args) -> int:
+    if is_running():
+        if send_action("toggle"):
+            return 0
+        print(yellow("%s: the sidebar holds its D-Bus name but did not answer; "
+                     "restarting it" % PROG), file=sys.stderr)
+        send_action("quit")
+        wait_until(lambda: not is_running(), timeout=3.0)
+    # Nothing is running, so "toggle" can only mean "show".
+    return launch(["--show"], use_systemd=args.systemd)
+
+
+def cmd_show(args) -> int:
+    if is_running() and send_action("show"):
+        return 0
+    return launch(["--show"], use_systemd=args.systemd)
+
+
+def cmd_new(args) -> int:
+    """Start a fresh conversation and show the sidebar."""
+    if is_running() and send_action("new-chat"):
+        send_action("show")
+        return 0
+    return launch(["--new"], use_systemd=args.systemd)
+
+
+def cmd_hide(args) -> int:
+    if not is_running():
+        return 0          # already hidden, by virtue of not existing
+    send_action("hide")
+    return 0
+
+
+def cmd_quit(args) -> int:
+    if not is_running():
+        if shutil.which("systemctl"):
+            subprocess.run(["systemctl", "--user", "stop", SYSTEMD_UNIT],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return 0
+    send_action("quit")
+    if not wait_until(lambda: not is_running(), timeout=5.0):
+        print(yellow("%s: the sidebar did not exit within 5s" % PROG), file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_restart(args) -> int:
+    cmd_quit(args)
+    wait_until(lambda: not is_running(), timeout=5.0)
+    return launch(["--show"], use_systemd=args.systemd)
+
+
+def cmd_daemon(args) -> int:
+    """Start the sidebar hidden, for session autostart."""
+    if is_running():
+        return 0
+    return launch(["--daemon"], use_systemd=args.systemd)
+
+
+def cmd_reload_theme(args) -> int:
+    """Ask a running sidebar to re-read the wallbash stylesheet.
+
+    The sidebar watches ~/.cache/hyde/wallbash/hyde-ai.css with a
+    Gio.FileMonitor, so this is only a manual fallback. It is the same GAction
+    the wallbash post-render hook activates."""
+    if not is_running():
+        print("%s: not running; nothing to restyle" % PROG)
+        return 0
+    if send_action("reload-theme"):
+        print("%s: asked the sidebar to reload its stylesheet" % PROG)
+        return 0
+    # The app need not export that action -- it watches the file itself. Bump
+    # the mtime so its Gio.FileMonitor fires.
+    if os.path.exists(WALLBASH_CSS):
+        try:
+            os.utime(WALLBASH_CSS, None)
+            print("%s: touched %s; the sidebar's file monitor will pick it up"
+                  % (PROG, WALLBASH_CSS))
+            return 0
+        except OSError as exc:
+            print(yellow("%s: could not touch %s (%s)" % (PROG, WALLBASH_CSS, exc)),
+                  file=sys.stderr)
+            return 1
+    print(yellow("%s: %s does not exist yet; run `hyde-shell reload theme`"
+                 % (PROG, WALLBASH_CSS)), file=sys.stderr)
+    return 1
+
+
+def cmd_status(args) -> int:
+    running = is_running()
+    entry = find_entry()
+    print("%-16s %s" % ("state:", green("running") if running else dim("not running")))
+    print("%-16s %s" % ("app id:", APP_ID))
+    print("%-16s %s" % ("object path:", object_path_for(APP_ID)))
+    print("%-16s %s" % ("namespace:", LAYER_NAMESPACE))
+    print("%-16s %s" % ("entry point:", entry[1] if entry else red("not found")))
+    print("%-16s %s" % ("config:", CONFIG_FILE if os.path.exists(CONFIG_FILE)
+                        else dim(CONFIG_FILE + " (absent)")))
+    print("%-16s %s" % ("log:", LOG_FILE))
+    if running and shutil.which("hyprctl"):
+        try:
+            out = subprocess.run(["hyprctl", "layers"], capture_output=True,
+                                 text=True, timeout=5).stdout
+            state = green("mapped") if LAYER_NAMESPACE in out else yellow("not mapped")
+            print("%-16s %s" % ("layer surface:", state))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return 0 if running else 3
+
+
+def cmd_version(args) -> int:
+    print("%s %s" % (PROG, VERSION))
+    try:
+        import gi
+        print("  PyGObject      %s" % gi.__version__)
+    except Exception:
+        print("  PyGObject      " + red("missing"))
+    try:
+        import gi
+        gi.require_version("Gtk", "4.0")
+        from gi.repository import Gtk
+        print("  GTK            %d.%d.%d" % (Gtk.get_major_version(),
+                                             Gtk.get_minor_version(),
+                                             Gtk.get_micro_version()))
+    except Exception:
+        print("  GTK            " + red("unavailable"))
+    ok, detail = check_typelib("Gtk4LayerShell", "1.0")
+    print("  layer-shell    %s" % (detail if ok else red(detail)))
+    print("  python         %d.%d.%d" % sys.version_info[:3])
+    return 0
+
+
+def cmd_log(args) -> int:
+    unit_active = False
+    if shutil.which("systemctl"):
+        probe = subprocess.run(["systemctl", "--user", "is-active", SYSTEMD_UNIT],
+                               capture_output=True, text=True)
+        unit_active = probe.stdout.strip() == "active"
+    if unit_active and shutil.which("journalctl"):
+        argv = ["journalctl", "--user", "-u", SYSTEMD_UNIT, "-n", "200"]
+        if args.follow:
+            argv.append("-f")
+        return subprocess.call(argv)
+    if not os.path.exists(LOG_FILE):
+        print("%s: no log yet at %s" % (PROG, LOG_FILE))
+        return 0
+    argv = ["tail", "-n", "200"] + (["-f"] if args.follow else []) + [LOG_FILE]
+    return subprocess.call(argv)
+
+
+def cmd_doctor(args) -> int:
+    print(bold("hyde-ai %s — environment report" % VERSION))
+    print()
+
+    failures = 0
+    warnings = 0
+
+    print(bold("runtime"))
+    for name, ok, detail in preflight():
+        required = name in REQUIRED_CHECKS
+        if ok:
+            mark = green("  ok  ")
+        elif required:
+            mark = red(" FAIL ")
+            failures += 1
+        else:
+            mark = yellow(" warn ")
+            warnings += 1
+        print("  [%s] %-24s %s" % (mark, name, detail))
+        if not ok and name in HINTS:
+            for line in HINTS[name].splitlines():
+                print("        %s" % dim(line))
+
+    print()
+    print(bold("session"))
+    wayland = os.environ.get("WAYLAND_DISPLAY", "")
+    if wayland:
+        print("  [%s] %-24s %s" % (green("  ok  "), "wayland", wayland))
+    else:
+        print("  [%s] %-24s %s" % (red(" FAIL "), "wayland", "WAYLAND_DISPLAY is not set"))
+        print("        %s" % dim("a layer-shell surface exists only on Wayland"))
+        failures += 1
+    signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    if signature:
+        print("  [%s] %-24s %s" % (green("  ok  "), "hyprland", signature[:24] + "..."))
+    else:
+        print("  [%s] %-24s %s" % (yellow(" warn "), "hyprland",
+                                   "HYPRLAND_INSTANCE_SIGNATURE is not set"))
+        warnings += 1
+
+    print()
+    print(bold("files"))
+    for label, path, important in (
+        ("config", CONFIG_FILE, True),
+        ("state dir", STATE_DIR, False),
+        ("history", HISTORY_FILE, False),
+        ("wallbash template", WALLBASH_TEMPLATE, True),
+        ("wallbash css", WALLBASH_CSS, True),
+        ("hyprland snippet", SNIPPET_FILE, False),
+    ):
+        if os.path.exists(path):
+            print("  [%s] %-24s %s" % (green("  ok  "), label, path))
+            continue
+        if important:
+            print("  [%s] %-24s %s" % (yellow(" warn "), label, path + " (missing)"))
+            warnings += 1
+            if path == WALLBASH_CSS:
+                print("        %s" % dim("render it with:  hyde-shell reload theme"))
+            elif path == WALLBASH_TEMPLATE:
+                print("        %s" % dim("without it the sidebar falls back to a "
+                                         "neutral palette"))
+            elif path == CONFIG_FILE:
+                print("        %s" % dim("create it with:  hyde-ai --setup"))
+        else:
+            print("  [%s] %-24s %s" % (dim("  --  "), label, path + " (not created yet)"))
+
+    if os.path.exists(CONFIG_FILE):
+        mode = os.stat(CONFIG_FILE).st_mode & 0o777
+        if mode & 0o077:
+            print("  [%s] %-24s %s" % (yellow(" warn "), "config permissions",
+                                       "mode %o -- it can hold API keys" % mode))
+            print("        %s" % dim("fix with:  chmod 600 %s" % CONFIG_FILE))
+            warnings += 1
+
+    print()
+    print(bold("providers"))
+    config = read_config()
+    for provider in PROVIDERS:
+        if provider["id"] == "ollama":
+            base_url = cfg_get(config, "ollama.base_url", DEFAULT_OLLAMA_URL)
+            models = detect_ollama_models(base_url)
+            if models is None:
+                print("  [%s] %-24s %s" % (dim("  --  "), "Ollama (local)",
+                                           dim("not reachable at %s" % base_url)))
+            elif models:
+                print("  [%s] %-24s %s" % (green("  ok  "), "Ollama (local)",
+                                           "%d model(s): %s"
+                                           % (len(models), ", ".join(models[:4]))))
+            else:
+                print("  [%s] %-24s %s" % (yellow(" warn "), "Ollama (local)",
+                                           "running, but no models pulled"))
+                print("        %s" % dim("try:  ollama pull gemma4:12b"))
+                warnings += 1
+            continue
+        usable = provider_usable(config, provider)
+        mark = green("  ok  ") if usable else dim("  --  ")
+        print("  [%s] %-24s %s" % (mark, provider["name"],
+                                   describe_key(config, provider)))
+
+    if not any(provider_usable(config, p) for p in PROVIDERS):
+        print("        %s" % yellow("no provider is usable yet -- run `hyde-ai --setup`"))
+        warnings += 1
+
+    selected = (cfg_get(config, "provider", "") or "").strip()
+    model = (cfg_get(config, "models.%s" % selected, "") or "").strip() if selected else ""
+    print("  %-31s %s" % (dim("selected provider"),
+                          selected or dim("(none yet -- run `hyde-ai --setup`)")))
+    print("  %-31s %s" % (dim("selected model"),
+                          model or dim("(provider default)")))
+
+    print()
+    print(bold("desktop integration"))
+    bind_found = False
+    if shutil.which("hyprctl"):
+        try:
+            raw = subprocess.run(["hyprctl", "-j", "binds"], capture_output=True,
+                                 text=True, timeout=5).stdout
+            for entry in json.loads(raw or "[]"):
+                if PROG not in (entry.get("arg") or ""):
+                    continue
+                bind_found = True
+                mask = entry.get("modmask", 0)
+                mods = [label for bit, label in
+                        ((64, "SUPER"), (4, "CTRL"), (1, "SHIFT"), (8, "ALT"))
+                        if mask & bit]
+                combo = " + ".join(mods + [entry.get("key", "?")])
+                print("  [%s] %-24s %s" % (green("  ok  "), "keybind", combo))
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+    if not bind_found:
+        print("  [%s] %-24s %s" % (yellow(" warn "), "keybind",
+                                   "no Hyprland bind runs hyde-ai"))
+        print("        %s" % dim("review, then append %s" % SNIPPET_FILE))
+        print("        %s" % dim("to ~/.config/hypr/hyprland.lua"))
+        warnings += 1
+
+    running = is_running()
+    print("  [%s] %-24s %s" % (green("  ok  ") if running else dim("  --  "),
+                               "sidebar process",
+                               "running" if running else "not running"))
+
+    print()
+    if failures:
+        print(red("%d blocking problem(s), %d warning(s)." % (failures, warnings)))
+        return 1
+    if warnings:
+        print(yellow("No blocking problems, %d warning(s)." % warnings))
+        return 0
+    print(green("Everything checks out."))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Setup wizard
+# --------------------------------------------------------------------------- #
+
+def ask(prompt: str, default: str = "") -> str:
+    suffix = " [%s]" % default if default else ""
+    try:
+        answer = input("%s%s: " % (prompt, suffix)).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        raise SystemExit(130)
+    return answer or default
+
+
+def ask_yes(prompt: str, default: bool = True) -> bool:
+    suffix = "[Y/n]" if default else "[y/N]"
+    while True:
+        answer = ask("%s %s" % (prompt, suffix)).strip().lower()
+        if not answer:
+            return default
+        if answer in ("y", "yes"):
+            return True
+        if answer in ("n", "no"):
+            return False
+        print("  please answer y or n")
+
+
+def ask_secret(prompt: str) -> str:
+    try:
+        return getpass.getpass("%s: " % prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        raise SystemExit(130)
+
+
+def cmd_setup(args) -> int:
+    if not _isatty():
+        die("--setup needs an interactive terminal.",
+            "run it from a terminal, or edit %s by hand" % CONFIG_FILE)
+
+    ensure_dirs()
+    config = read_config()
+    existed = os.path.exists(CONFIG_FILE)
+
+    print(bold("hyde-ai setup"))
+    print("Writing %s (mode 0600)." % CONFIG_FILE)
+    print("Only the settings you change are written; everything else is left alone.")
+    print()
+    print(dim("A key can live in one of two places:"))
+    print(dim("  * here, in config.json  -- paste it below"))
+    print(dim("  * in the environment    -- leave blank and export the variable"))
+    print(dim("The sidebar checks config.json first, then the environment."))
+    print()
+
+    # ---- credentials ------------------------------------------------------
+    for provider in PROVIDERS:
+        if provider["id"] == "ollama":
+            continue           # a local daemon needs no key; handled below
+        print(bold(provider["name"]))
+        print("  current:  %s" % describe_key(config, provider))
+        print("  env var:  %s" % dim(" or ".join(provider["env_vars"])))
+        print("  get one:  %s" % dim(provider["key_url"]))
+        secret = ask_secret("  paste key (Enter = leave as is, '-' = clear)")
+        if secret == "-":
+            cfg_set(config, "api_keys.%s" % provider["id"], "")
+            print("  " + yellow("cleared from config.json"))
+        elif secret:
+            cfg_set(config, "api_keys.%s" % provider["id"], secret)
+            print("  " + green("stored in config.json"))
+        else:
+            var, _ = env_key(provider)
+            if var:
+                print("  " + dim("unchanged; $%s will be used" % var))
+            elif stored_key(config, provider["id"]):
+                print("  " + dim("unchanged"))
+            else:
+                print("  " + dim("skipped; export %s to use it later"
+                                 % provider["env_vars"][0]))
+        print()
+
+    # ---- Ollama -----------------------------------------------------------
+    print(bold("Ollama (local models)"))
+    base_url = ask("  base url", cfg_get(config, "ollama.base_url", DEFAULT_OLLAMA_URL))
+    cfg_set(config, "ollama.base_url", base_url)
+    ollama_models = detect_ollama_models(base_url)
+    if ollama_models is None:
+        print("  " + yellow("not reachable at %s" % base_url))
+        print("  " + dim("that is fine -- the sidebar re-checks at runtime"))
+        ollama_models = []
+    elif ollama_models:
+        print("  " + green("found: %s" % ", ".join(ollama_models)))
+    else:
+        print("  " + yellow("running, but no models are pulled"))
+        print("  " + dim("try:  ollama pull gemma4:12b"))
+    print()
+
+    # ---- default provider and model --------------------------------------
+    print(bold("Which provider should the sidebar open with?"))
+    choices = []
+    for provider in PROVIDERS:
+        usable = (bool(ollama_models) if provider["id"] == "ollama"
+                  else provider_usable(config, provider))
+        choices.append((provider, usable))
+    current_provider = (cfg_get(config, "provider", "") or "anthropic")
+    for index, (provider, usable) in enumerate(choices, 1):
+        marker = " *" if provider["id"] == current_provider else "  "
+        state = green("ready") if usable else dim("no key / not running")
+        print("  %s%d) %-12s %s" % (marker, index, provider["name"], state))
+    raw = ask("  choice", str(next((i for i, (p, _) in enumerate(choices, 1)
+                                    if p["id"] == current_provider), 1)))
+    if raw.isdigit() and 1 <= int(raw) <= len(choices):
+        chosen = choices[int(raw) - 1][0]
+    else:
+        chosen = PROVIDER_BY_ID.get(raw.strip().lower(), choices[0][0])
+    cfg_set(config, "provider", chosen["id"])
+    print("  provider: " + green(chosen["id"]))
+    print()
+
+    models = list(ollama_models) if chosen["id"] == "ollama" else list(chosen["models"])
+    if models:
+        print(bold("Default model for %s" % chosen["name"]))
+        _mkey = "models.%s" % chosen["id"]
+        current_model = (cfg_get(config, _mkey, "") or "").strip()
+        if current_model not in models:
+            current_model = chosen["default_model"] or models[0]
+        for index, model in enumerate(models, 1):
+            marker = " *" if model == current_model else "  "
+            print("  %s%2d) %s" % (marker, index, model))
+        raw = ask("  choice (number, or type a model id)", current_model)
+        if raw.isdigit() and 1 <= int(raw) <= len(models):
+            cfg_set(config, _mkey, models[int(raw) - 1])
+        elif raw:
+            cfg_set(config, _mkey, raw)
+        print("  model: " + green(cfg_get(config, _mkey, "")))
+        print()
+    elif chosen["id"] == "ollama":
+        print(yellow("  no local models to choose from yet; pull one and rerun --setup"))
+        print()
+
+    if not existed:
+        config.setdefault("version", 1)
+
+    write_config(config)
+    print(green("Wrote %s" % CONFIG_FILE))
+
+    # ---- theming ----------------------------------------------------------
+    if not os.path.exists(WALLBASH_CSS):
+        print()
+        print(bold("Theming"))
+        if os.path.exists(WALLBASH_TEMPLATE):
+            print("  %s has not been rendered yet." % WALLBASH_CSS)
+            if shutil.which("hyde-shell") and ask_yes(
+                    "  run `hyde-shell reload theme` now?", default=True):
+                subprocess.call(["hyde-shell", "reload", "theme"])
+        else:
+            print("  " + yellow("the wallbash template is not installed:"))
+            print("  " + dim(WALLBASH_TEMPLATE))
+            print("  " + dim("until it is, the sidebar uses a neutral fallback palette"))
+
+    # ---- keybind ----------------------------------------------------------
+    if os.path.exists(SNIPPET_FILE):
+        print()
+        print(bold("Keybind"))
+        print("  Review this, then append it to ~/.config/hypr/hyprland.lua:")
+        print("    " + SNIPPET_FILE)
+        print("  " + dim("nothing is appended for you -- that file is yours"))
+
+    print()
+    print("Try it now:   %s --show" % PROG)
+    print("Check setup:  %s --doctor" % PROG)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Argument parsing
+# --------------------------------------------------------------------------- #
+
+EPILOG = """\
+examples:
+  hyde-ai                 toggle the sidebar (this is what the keybind runs)
+  hyde-ai --setup         interactively record API keys and the default model
+  hyde-ai --doctor        check every dependency and integration point
+  hyde-ai --log -f        follow the sidebar's output
+
+files:
+  ~/.config/hyde-ai/config.json          configuration and API keys (mode 0600)
+  ~/.local/lib/hyde-ai/                  the Python package
+  ~/.local/state/hyde-ai/                chat history and log
+  ~/.cache/hyde/wallbash/hyde-ai.css     generated theme, follows the wallpaper
+"""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=PROG,
+        description="Launch, toggle and configure the HyDE AI sidebar.",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--toggle", dest="mode", action="store_const", const="toggle",
+                      help="show the sidebar if hidden, hide it if shown (default)")
+    mode.add_argument("--show", dest="mode", action="store_const", const="show",
+                      help="show the sidebar, starting it if necessary")
+    mode.add_argument("--hide", dest="mode", action="store_const", const="hide",
+                      help="hide the sidebar without quitting it")
+    mode.add_argument("--quit", dest="mode", action="store_const", const="quit",
+                      help="ask the running sidebar to exit")
+    mode.add_argument("--new", dest="mode", action="store_const", const="new",
+                      help="start a fresh conversation, then show the sidebar")
+    mode.add_argument("--restart", dest="mode", action="store_const", const="restart",
+                      help="quit the sidebar, then start it again")
+    parser.add_argument("--side", dest="side_value", metavar="left|right",
+                        nargs="?", const="",
+                        help="which screen edge the panel opens on (persists)")
+    parser.add_argument("--width", dest="width_value", metavar="PCT|PX",
+                        nargs="?", const="",
+                        help="panel width, e.g. 35, 35%% or 700px (persists)")
+    mode.add_argument("--daemon", dest="mode", action="store_const", const="daemon",
+                      help="start the sidebar hidden, for session autostart")
+    mode.add_argument("--status", dest="mode", action="store_const", const="status",
+                      help="report whether the sidebar is running")
+    mode.add_argument("--doctor", dest="mode", action="store_const", const="doctor",
+                      help="check dependencies, config, theming and the keybind")
+    mode.add_argument("--setup", dest="mode", action="store_const", const="setup",
+                      help="interactively write ~/.config/hyde-ai/config.json")
+    mode.add_argument("--reload-theme", dest="mode", action="store_const",
+                      const="reload-theme",
+                      help="re-read the wallbash stylesheet (normally automatic)")
+    mode.add_argument("--log", dest="mode", action="store_const", const="log",
+                      help="show the sidebar's recent output")
+    mode.add_argument("--version", dest="mode", action="store_const", const="version",
+                      help="print versions of hyde-ai and its runtime")
+
+    parser.add_argument("-f", "--follow", action="store_true",
+                        help="with --log, keep following the output")
+    parser.add_argument("--systemd", action="store_true",
+                        help="start the sidebar as a transient user service "
+                             "(journald logging, systemctl --user control)")
+    parser.set_defaults(mode="toggle")
+    return parser
+
+
+def _persist_panel_setting(dotted, value, label):
+    """Write a sidebar.* setting without the running app clobbering it.
+
+    The running instance holds config.json in memory and saves it on shutdown,
+    so writing first and restarting second loses the change. Quit first, then
+    write, then bring it back.
+    """
+    was_running = is_running()
+    if was_running:
+        try:
+            cmd_quit(argparse.Namespace(mode="quit"))
+        except Exception:
+            pass
+        for _ in range(30):
+            if not is_running():
+                break
+            time.sleep(0.1)
+    config = read_config()
+    cfg_set(config, dotted, value)
+    write_config(config)
+    print("%s  (saved)" % label)
+    if was_running:
+        print(dim("restarting..."))
+        try:
+            subprocess.Popen([sys.argv[0], "--show"], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            print(red("could not restart: %s" % exc))
+            return 1
+    return 0
+
+
+def cmd_side(args):
+    """Persist which screen edge the panel opens on."""
+    want = (getattr(args, "side_value", "") or "").strip().lower()
+    config = read_config()
+    if want not in ("left", "right"):
+        current = cfg_get(config, "sidebar.edge", "right")
+        print("sidebar edge: %s" % green(current))
+        print("set it with: hyde-ai --side left   |   hyde-ai --side right")
+        return 0
+    return _persist_panel_setting("sidebar.edge", want,
+                                  "sidebar edge -> %s" % green(want))
+
+
+def cmd_width(args):
+    """Persist the panel width, as a percentage or an explicit pixel count."""
+    raw = (getattr(args, "width_value", "") or "").strip().lower().rstrip("%")
+    config = read_config()
+    if not raw:
+        frac = cfg_get(config, "sidebar.width_fraction", 0.28)
+        print("sidebar width: %s of the screen" % green("%d%%" % round(float(frac) * 100)))
+        print("set it with: hyde-ai --width 35   |   hyde-ai --width 700px")
+        return 0
+    try:
+        if raw.endswith("px"):
+            pixels = float(raw[:-2])
+            fraction = pixels / float(screen_width() or 1920)
+        else:
+            value = float(raw)
+            fraction = value / 100.0 if value > 1 else value
+    except ValueError:
+        print(red("not a width: %s" % raw))
+        print("try: 35, 35%, or 700px")
+        return 1
+    fraction = max(0.15, min(0.90, fraction))
+    return _persist_panel_setting("sidebar.width_fraction", round(fraction, 4),
+                                  "sidebar width -> %s"
+                                  % green("%d%%" % round(fraction * 100)))
+
+
+def screen_width():
+    """Monitor width in logical pixels, via hyprctl; falls back to 1920."""
+    try:
+        out = subprocess.run(["hyprctl", "-j", "monitors"],
+                             capture_output=True, text=True, timeout=5)
+        mons = json.loads(out.stdout or "[]")
+        for m in mons:
+            if m.get("focused"):
+                return int(m.get("width", 1920) / (m.get("scale") or 1))
+        if mons:
+            m = mons[0]
+            return int(m.get("width", 1920) / (m.get("scale") or 1))
+    except Exception:
+        pass
+    return 1920
+
+
+COMMANDS = {
+    "toggle": cmd_toggle,
+    "side": cmd_side,
+    "width": cmd_width,
+    "show": cmd_show,
+    "hide": cmd_hide,
+    "quit": cmd_quit,
+    "new": cmd_new,
+    "restart": cmd_restart,
+    "daemon": cmd_daemon,
+    "status": cmd_status,
+    "doctor": cmd_doctor,
+    "setup": cmd_setup,
+    "reload-theme": cmd_reload_theme,
+    "log": cmd_log,
+    "version": cmd_version,
+}
+
+
+def main(argv) -> int:
+    args = build_parser().parse_args(argv)
+    # --side/--width sit outside the mutually-exclusive mode group so they can
+    # be queried with no value; route them here.
+    if getattr(args, "side_value", None) is not None:
+        return cmd_side(args)
+    if getattr(args, "width_value", None) is not None:
+        return cmd_width(args)
+    return COMMANDS[args.mode](args)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except BrokenPipeError:
+        # `hyde-ai --log | head` and friends.
+        try:
+            os.close(sys.stdout.fileno())
+        except OSError:
+            pass
+        sys.exit(0)
+    except SystemExit:
+        raise
+    except Exception as exc:       # never show the user a traceback
+        die("unexpected failure: %s: %s" % (type(exc).__name__, exc),
+            "details were appended to %s" % LOG_FILE)
