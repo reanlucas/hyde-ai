@@ -20,6 +20,14 @@ Claude · Gemini · ChatGPT · Ollama local — todos com streaming.
 
 ---
 
+<div align="center">
+  <img src="docs/conversa.gif" width="420" alt="A maths question answered live: the reasoning header pulses, then five display formulas typeset one after another as the answer streams in">
+  <p><em>Uma pergunta de cálculo respondida pelo Qwen3.5 9B rodando local.
+  Acelerado 2&times;.</em></p>
+</div>
+
+---
+
 ## Matemática tipografada
 
 Fórmulas passam pelo `mathtext` do matplotlib, um parser TeX completo, e saem
