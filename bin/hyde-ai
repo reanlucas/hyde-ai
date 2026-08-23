@@ -386,6 +386,7 @@ CHILD_ENV_KEYS = (
     "PYTHONPATH", "PYTHONUNBUFFERED", "HYDE_AI_LIB", "HYDE_AI_CONFIG",
     "HYDE_AI_APP_ID", "HYDE_AI_STATE", "HYDE_AI_CACHE", "HYDE_AI_CSS",
     "HYDE_AI_NAMESPACE", "HYDE_AI_VERSION", "GDK_BACKEND",
+    "GTK_IM_MODULE",
 )
 
 
@@ -405,6 +406,12 @@ def child_env() -> dict:
     env["HYDE_AI_VERSION"] = VERSION
     # A layer-shell surface exists only on Wayland; never let GTK pick X11.
     env["GDK_BACKEND"] = "wayland"
+    # Sob Wayland o GTK4 roteia o teclado pelo text-input-v3 do compositor.
+    # Sem um input method rodando ninguem monta as dead keys, e digitar
+    # ' + a nao produz "a" -- as teclas simples passam, os acentos somem.
+    # O modulo simples do proprio GTK compoe localmente e le ~/.XCompose.
+    if not env.get("GTK_IM_MODULE"):
+        env["GTK_IM_MODULE"] = "gtk-im-context-simple"
     return env
 
 

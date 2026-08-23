@@ -139,6 +139,25 @@ As métricas ficam gravadas junto da mensagem, então acompanham a conversa.
 
 ---
 
+## Modelos de raciocínio
+
+Qwen3, o-series e Claude com *thinking* geram um rascunho antes da resposta.
+
+**Desligado por padrão** — o rascunho multiplica o tempo de resposta por cinco
+ou mais, e quase nunca compensa numa barra lateral. O botão ao lado do envio
+liga por pergunta; `/think` aceita `auto`, `on`, `off`, `low`, `medium` e
+`high`.
+
+Com ele ligado, o cabeçalho pulsa **Pensando…** enquanto o modelo trabalha e
+vira **Pensou por 36s** quando termina — clicável, com o rascunho inteiro
+dentro.
+
+Sem isso a bolha ficaria vazia durante todo o raciocínio, e vazia para sempre
+se o rascunho consumisse todo o `max_tokens`. Quando isso acontece, o painel
+diz o que houve em vez de deixar a mensagem em branco.
+
+---
+
 ## Histórico
 
 Conversas salvas e agrupadas por provedor, com título, data e contagem de
@@ -154,6 +173,19 @@ alinhamento, listas, ênfase, código com realce via GtkSourceView.
 
 Matemática detectada em quatro formatos, porque os modelos alternam entre eles:
 `$$...$$`, `\[...\]`, ` ```math ` e parágrafos que são só LaTeX.
+
+O `$` de shell não é confundido com matemática: `$HOME`, `$1`, `${VAR}` e `$5`
+ficam como texto. Durante o streaming, uma fórmula ainda pela metade fica
+escondida até o delimitador fechar — ela aparece inteira, de uma vez.
+
+### Testes
+
+```bash
+python3 tests/test_bateria.py     # 43 casos: matemática, Python, JS, shell
+python3 tests/test_parser.py      # 21 casos: regressões e streaming
+```
+
+Cada caso veio de uma resposta que apareceu errada na tela.
 
 ---
 

@@ -106,6 +106,48 @@ _TAM_DELIM = re.compile(r"\\(?:bigg?|Bigg?)[lrm]?(?=\s*[\\(\[\{\)\]\}|.])")
 _BOXED = re.compile(r"\\(?:boxed|fbox|framebox)\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}")
 
 
+# Apelidos que o LaTeX aceita e o mathtext nao conhece. O KaTeX carrega uma
+# tabela equivalente internamente; aqui ela e explicita. A chave e o comando
+# como os modelos escrevem, o valor e o que o mathtext entende.
+_APELIDOS = {
+    # relacoes
+    "ge": "geq", "le": "leq", "ne": "neq",
+    "gets": "leftarrow", "to": "rightarrow",
+    "implies": "Rightarrow", "impliedby": "Leftarrow", "iff": "Leftrightarrow",
+    "land": "wedge", "lor": "vee", "lnot": "neg",
+    "coloneqq": "colon=", "eqqcolon": "=colon",
+    # conjuntos e logica
+    "empty": "emptyset", "N": "mathbb{N}", "Z": "mathbb{Z}",
+    "Q": "mathbb{Q}", "R": "mathbb{R}", "C": "mathbb{C}",
+    # operadores escritos por extenso
+    "arcsen": "operatorname{arcsen}", "sen": "operatorname{sen}",
+    "tg": "operatorname{tg}", "cotg": "operatorname{cotg}",
+    "mdc": "operatorname{mdc}", "mmc": "operatorname{mmc}",
+    # espacamento e enfeites que nao mudam o significado
+    "nobreakspace": ",", "thinspace": ",", "negthinspace": "!",
+    "mathrm": "mathregular",
+}
+
+_APELIDO_RE = re.compile(r"\\([A-Za-z]+)")
+
+
+def _troca_apelidos(tex: str) -> str:
+    return _APELIDO_RE.sub(
+        lambda m: "\\" + _APELIDOS.get(m.group(1), m.group(1)), tex)
+
+
+# \begin{cases} ... \end{cases}: o mathtext nao tem ambientes. Vira uma chave
+# aberta com os ramos separados, que e como se le em papel.
+_CASES = re.compile(
+    r"\\begin\{(cases|dcases)\}(.*?)\\end\{\1\}", re.S)
+
+
+def _achatar_cases(m) -> str:
+    ramos = [r.strip() for r in re.split(r"\\\\", m.group(2)) if r.strip()]
+    ramos = [re.sub(r"\s*&\s*", r" \\quad ", r) for r in ramos]
+    return r"\left\{ " + r" \quad ".join(ramos) + r" \right."
+
+
 def normalizar(tex: str) -> str:
     tex = _ALIGN.sub(lambda m: m.group(2), tex)
     tex = _BOXED.sub(lambda m: "{%s}" % m.group(1), tex)
@@ -115,7 +157,9 @@ def normalizar(tex: str) -> str:
         if novo == tex:
             break
         tex = novo
+    tex = _CASES.sub(_achatar_cases, tex)
     tex = _AMB.sub(_achatar_matriz, tex)
+    tex = _troca_apelidos(tex)
     tex = tex.replace(r"\displaystyle", "").replace(r"\textstyle", "")
     tex = re.sub(r"\\(?:label|tag|nonumber)\{[^}]*\}", "", tex)
     tex = re.sub(r"\\\\", r" \\quad ", tex)      # quebras -> espaco
@@ -186,6 +230,51 @@ def limpar_cache(max_arquivos: int = 4000):
 # O Gdk.Texture carrega SVG, mas fixa no tamanho nominal do arquivo. Passando
 # pelo Rsvg da para rasterizar na resolucao exata da tela, entao o simbolo sai
 # nitido em qualquer corpo e em qualquer fator de escala.
+
+class _FormulaPaintable:
+    """Envolve uma textura em alta resolucao e anuncia o tamanho LOGICO.
+
+    Um Gdk.Texture nao carrega fator de escala: ele se apresenta com o numero
+    de pixels que tem. Como rasterizamos na resolucao do dispositivo para o
+    simbolo sair nitido, o Gtk.Picture lia 2x (ou 1,25x) o tamanho pretendido
+    e esticava a formula. Esta casca separa as duas coisas -- desenha com
+    todos os pixels, mede em pontos logicos.
+    """
+
+    def __new__(cls, textura, larg, alt):
+        import gi
+        gi.require_version("Gdk", "4.0")
+        from gi.repository import Gdk, GObject
+
+        if not hasattr(cls, "_tipo"):
+            class _Impl(GObject.Object, Gdk.Paintable):
+                def __init__(self, textura, larg, alt):
+                    super().__init__()
+                    self._t, self._w, self._h = textura, max(1, larg), max(1, alt)
+
+                def do_get_intrinsic_width(self):
+                    return self._w
+
+                def do_get_intrinsic_height(self):
+                    return self._h
+
+                def do_get_intrinsic_aspect_ratio(self):
+                    return self._w / float(self._h)
+
+                def do_snapshot(self, snapshot, width, height):
+                    self._t.snapshot(snapshot, width, height)
+
+            cls._tipo = _Impl
+        return cls._tipo(textura, larg, alt)
+
+
+def paintable(svg_path, larg_alvo, altura_alvo, escala=1.0):
+    """Paintable de `larg_alvo` x `altura_alvo` px logicos, nitido em HiDPI."""
+    tex = textura(svg_path, altura_alvo, escala)
+    if tex is None:
+        return None
+    return _FormulaPaintable(tex, larg_alvo, altura_alvo)
+
 
 def textura(svg_path, altura_alvo, escala=1.0):
     """Devolve um Gdk.Texture do SVG com `altura_alvo` px logicos."""

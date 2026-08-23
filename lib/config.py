@@ -107,7 +107,10 @@ DEFAULTS: Dict[str, Any] = {
         "namespace": "hyde-ai",
     },
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
-    "max_tokens": 4096,
+    # Modelos de raciocinio gastam milhares de tokens no rascunho antes
+    # da primeira palavra da resposta; com 4096 eles batem o teto e
+    # terminam sem responder nada.
+    "max_tokens": 8192,
     # None => use each provider's own default. A float 0-2 is sent only to
     # providers/models that still accept sampling parameters.
     "temperature": None,
@@ -132,6 +135,10 @@ DEFAULTS: Dict[str, Any] = {
         "base_url": "http://localhost:11434",
         "num_ctx": 0,
         "keep_alive": "5m",
+        # Rascunho dos modelos de raciocinio. Desligado por padrao: ele
+        # multiplica o tempo de resposta por cinco ou mais, e quase nunca vale
+        # numa barra lateral. Liga no botao ao lado do envio, por pergunta.
+        "think": "off",
     },
     # Escape hatch: any endpoint speaking the OpenAI or Ollama wire format.
     # See providers.py :: build_custom_provider for the accepted shape.

@@ -74,6 +74,7 @@ window, window.background { background-color: transparent; }
 .msg-name   { font-size: 11px; font-weight: 600; color: @ha_fg_faint; }
 .msg-icon   { color: @ha_fg_ghost; -gtk-icon-size: 12px; }
 .msg-metricas { font-size: 11px; color: @ha_fg_ghost; }
+
 .msg-body   { background-color: transparent; }
 .msg-text, .md-text, .md {
   font-size: 15px;
@@ -97,15 +98,54 @@ window, window.background { background-color: transparent; }
 .msg-actions button:active { background-color: alpha(@ha_accent, 0.28); }
 
 /* ── raciocinio ────────────────────────────────────────────────────────── */
-.think {
-  background-color: alpha(@ha_layer1, 0.28);
-  border: 1px solid alpha(@ha_border, 0.22);
-  border-radius: 12px;
-  padding: 8px 12px;
-  margin: 4px 0;
+.think { margin: 2px 0 0 0; }
+
+.think-toggle {
+  padding: 2px 8px 2px 4px;
+  min-height: 0;
+  border-radius: 8px;
+  background: none;
+  border: none;
+  box-shadow: none;
 }
-.think-header { font-size: 11px; font-weight: 600; color: @ha_fg_faint; }
-.think-body   { font-size: 13px; color: @ha_fg_faint; }
+.think-toggle:hover { background-color: alpha(@ha_layer1, 0.45); }
+.think-chevron { -gtk-icon-size: 12px; color: @ha_fg_ghost; }
+.think-header  { font-size: 11px; font-weight: 600; color: @ha_fg_faint; }
+
+/* Enquanto o modelo pensa o rotulo respira, para o painel nao parecer
+   travado durante os segundos em que nao ha nada para mostrar. */
+@keyframes think-pulse {
+  0%   { opacity: 0.40; }
+  50%  { opacity: 1.00; }
+  100% { opacity: 0.40; }
+}
+.think-live {
+  color: @ha_accent;
+  animation: think-pulse 1.5s ease-in-out infinite;
+}
+
+/* toggle do raciocinio, ao lado do envio */
+.think-btn {
+  padding: 3px;
+  min-width: 22px;
+  min-height: 22px;
+  border-radius: 8px;
+  color: @ha_accent;
+  background: none;
+  border: none;
+  box-shadow: none;
+}
+.think-btn image { -gtk-icon-size: 14px; }
+.think-btn:hover { background-color: alpha(@ha_layer1, 0.55); }
+.think-btn.think-off { color: @ha_fg_ghost; }
+
+.think-body {
+  font-size: 12px;
+  color: @ha_fg_faint;
+  padding: 8px 12px;
+  margin: 4px 0 2px 0;
+  border-left: 2px solid alpha(@ha_border, 0.55);
+}
 
 /* ── codigo ────────────────────────────────────────────────────────────── */
 .code-block {
@@ -222,14 +262,21 @@ window, window.background { background-color: transparent; }
 .selector-row-sub    { font-size: 11px; color: @ha_fg_faint; }
 
 /* ── avisos e estado vazio ─────────────────────────────────────────────── */
+/* Flutua sobre a conversa, entao precisa de fundo opaco e sombra -- sem
+   isso o texto de baixo aparece atraves do aviso. */
 .banner {
-  background-color: alpha(@ha_accent_low, 0.35);
-  border: 1px solid alpha(@ha_accent, 0.30);
+  background-color: @ha_layer2;
+  border: 1px solid alpha(@ha_accent, 0.45);
   border-radius: 12px;
   padding: 8px 12px;
-  margin: 4px;
+  margin: 6px 8px;
+  box-shadow: 0 4px 14px alpha(black, 0.45);
 }
 .banner-label      { font-size: 13px; color: @ha_fg_muted; }
+
+/* excluir conversa, na propria linha do historico */
+.historico-apagar { color: @ha_fg_ghost; padding: 4px; margin-right: 6px; }
+.historico-apagar:hover { color: @ha_error; background-color: alpha(@ha_error, 0.16); }
 .placeholder       { background-color: transparent; }
 .placeholder-title { font-size: 18px; font-weight: 700; color: @ha_fg_muted; }
 .placeholder-body  { font-size: 13px; color: @ha_fg_ghost; }

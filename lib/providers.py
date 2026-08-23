@@ -1514,6 +1514,17 @@ class OllamaProvider(Provider):
         if keep_alive:
             payload["keep_alive"] = keep_alive
 
+        # Modelos de raciocinio (qwen3, deepseek-r1, gpt-oss) aceitam think.
+        # "auto" nao manda o campo e deixa o modelo decidir; "off" desliga o
+        # rascunho, o que corta muito da latencia em perguntas simples.
+        think = str(self.config.get("ollama.think", "off") or "off").strip().lower()
+        if think in ("off", "false", "no", "0"):
+            payload["think"] = False
+        elif think in ("on", "true", "yes", "1"):
+            payload["think"] = True
+        elif think in ("low", "medium", "high"):
+            payload["think"] = think
+
         response = _open_stream(
             self.name,
             self.base_url() + "/api/chat",

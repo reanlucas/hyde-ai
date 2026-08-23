@@ -98,6 +98,8 @@ DEFAULT_WIDTH_MIN = 420
 DEFAULT_WIDTH_MAX = 900
 ANIM_US = 240_000            # slide duration, microseconds
 DELTA_FLUSH_MS = 40          # streaming coalescing interval
+# teto do bloco de raciocinio, em px: mostra o suficiente sem engolir a tela
+THINK_MAX_H = 180
 
 ROLE_USER = "user"
 ROLE_ASSISTANT = "assistant"
@@ -817,15 +819,19 @@ class TableBlock(Gtk.Grid):
 
 # Fator sobre o tamanho nominal do SVG: o mathtext ja compoe na proporcao
 # certa, isto so amplia para leitura confortavel no painel.
-_MATH_ESCALA = 1.0
+_MATH_ESCALA = 1.25       # display um tico maior que a prosa, como no LaTeX
 # Corpo da formula, em pontos. Proximo do texto (15px) com leve destaque.
-_MATH_CORPO = 11
+_MATH_CORPO = 13
 
 
 def _math_inline_markup(tex):
     """TeX inline -> markup Pango. Chamado pelo parser via gancho."""
     return '<span size="larger"><i>%s</i></span>' % _tex_para_unicode(
         html.escape(tex, quote=True))
+
+
+# Comando LaTeX que sobreviveu a todas as conversoes.
+_TEX_SOBRA = re.compile(r"\\[A-Za-z]+(?:\{[^{}]*\})*")
 
 
 def _math_solto_markup(markup):
@@ -855,7 +861,19 @@ def _math_solto_markup(markup):
             if t == antes:
                 break
         partes[i] = t
-    return "".join(partes)
+
+    # Rede final. Se algum comando escapou de todas as conversoes, ele vira
+    # monoespacado: fica claro que e codigo LaTeX que nao coube, em vez de
+    # aparecer como prosa quebrada no meio da frase.
+    saida = "".join(partes)
+    if _TEX_SOBRA.search(re.sub(r"<[^>]+>", "", saida)):
+        pedacos = re.split(r"(<[^>]+>)", saida)
+        for i in range(0, len(pedacos), 2):
+            if _TEX_SOBRA.search(pedacos[i]):
+                pedacos[i] = _TEX_SOBRA.sub(
+                    lambda m: "<tt>%s</tt>" % m.group(0), pedacos[i])
+        saida = "".join(pedacos)
+    return saida
 
 
 if _md is not None:
@@ -900,9 +918,19 @@ class MathBlock(Gtk.Box):
                 continue
             self._caminhos.append(p)
             fig = Gtk.Picture()
-            fig.set_can_shrink(False)
-            fig.set_content_fit(Gtk.ContentFit.FILL)
+            # can_shrink=False + FILL fazia o Picture exigir a largura toda da
+            # coluna e esticar a formula junto: "E = mc^2" saia com 631px de
+            # largura para 49px de imagem.
+            # CONTAIN e height-for-width: dada a largura da coluna ele pede a
+            # altura que preencheria tudo, e o container cresce junto.
+            # SCALE_DOWN so encolhe -- formula curta fica no tamanho, formula
+            # larga demais cabe sozinha.
+            fig.set_can_shrink(True)
+            fig.set_content_fit(Gtk.ContentFit.SCALE_DOWN)
             fig.set_halign(Gtk.Align.START)
+            fig.set_valign(Gtk.Align.START)
+            fig.set_hexpand(False)
+            fig.set_vexpand(False)
             self._figuras.append(fig)
             self.append(fig)
 
@@ -971,11 +999,11 @@ class MathBlock(Gtk.Box):
                                  .get_intrinsic_size_in_pixels())
                 if not ok or alt <= 0:
                     continue
-                w = int(larg * _MATH_ESCALA)
-                h = int(alt * _MATH_ESCALA)
-                tex = _mathrender.textura(caminho, h, escala)
-                if tex is not None:
-                    fig.set_paintable(tex)
+                w = max(1, int(round(larg * _MATH_ESCALA)))
+                h = max(1, int(round(alt * _MATH_ESCALA)))
+                pintura = _mathrender.paintable(caminho, w, h, escala)
+                if pintura is not None:
+                    fig.set_paintable(pintura)
                     fig.set_size_request(w, h)
             except Exception as exc:
                 _warn("nao consegui rasterizar a formula: %r" % (exc,))
@@ -1213,6 +1241,192 @@ _ROLE_META = {
 }
 
 
+class _DeltaTexto(object):
+    """Evento de texto, para registries que nao rotulam os deltas."""
+
+    __slots__ = ("kind", "text", "data")
+
+    def __init__(self, text):
+        self.kind = "text"
+        self.text = text
+        self.data = {}
+
+
+def _somente_texto(deltas):
+    for delta in deltas:
+        if delta:
+            yield _DeltaTexto(delta)
+
+
+# Delimitadores de matematica reconhecidos, do mais longo para o mais curto
+# (senao "$$" seria lido como dois "$").
+_PARES_MATH = (("$$", "$$"), ("\\[", "\\]"), ("\\(", "\\)"), ("$", "$"))
+
+
+def _corta_math_incompleta(texto):
+    """Remove a formula ainda pela metade no fim do texto em streaming.
+
+    Enquanto os tokens chegam, "$b_n = \\frac{2(-1)^{" fica como LaTeX cru na
+    tela ate o delimitador fechar. Cortar esse rabo faz a formula aparecer
+    inteira, de uma vez, em vez de se montar aos pedacos como codigo.
+
+    Uma unica varredura da esquerda para a direita: fora de matematica procura
+    uma abertura, dentro procura o fechamento correspondente. O que sobrar
+    aberto no fim e o corte.
+    """
+    if not texto or ("$" not in texto and "\\" not in texto):
+        return texto
+
+    i = 0
+    n = len(texto)
+    abertura = None          # indice do delimitador aberto, se houver
+    fecha_esperado = None
+    while i < n:
+        if abertura is None:
+            for abre, fecha in _PARES_MATH:
+                if texto.startswith(abre, i):
+                    abertura, fecha_esperado = i, fecha
+                    i += len(abre)
+                    break
+            else:
+                i += 1
+        else:
+            if texto.startswith(fecha_esperado, i):
+                i += len(fecha_esperado)
+                abertura, fecha_esperado = None, None
+            else:
+                i += 1
+
+    if abertura is None:
+        return texto
+    return texto[:abertura].rstrip()
+
+
+class ThinkingBlock(Gtk.Box):
+    """Indicador de raciocinio: pulsa enquanto o modelo pensa, e depois vira
+    um resumo clicavel com o rascunho inteiro dentro.
+
+    Enquanto nao ha resposta, este e o unico sinal de que algo esta
+    acontecendo -- por isso ele se anuncia; quando a resposta chega, encolhe
+    para uma linha e sai da frente.
+    """
+
+    _PASSOS = ("", ".", "..", "...")
+
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add_css_class("think")
+        self._texto = ""
+        self._t0 = None
+        self._decorrido = 0.0
+        self._tick = 0
+        self._tick_id = 0
+        self._aberto = False
+
+        self._chevron = Gtk.Image.new_from_icon_name("pan-end-symbolic")
+        self._chevron.add_css_class("think-chevron")
+
+        self._rotulo = Gtk.Label(xalign=0.0, label="Pensando")
+        self._rotulo.add_css_class("think-header")
+
+        linha = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        linha.append(self._chevron)
+        linha.append(self._rotulo)
+
+        self._botao = Gtk.Button()
+        self._botao.set_child(linha)
+        self._botao.add_css_class("flat")
+        self._botao.add_css_class("think-toggle")
+        self._botao.set_halign(Gtk.Align.START)
+        self._botao.connect("clicked", self._alternar)
+        self.append(self._botao)
+
+        self._corpo = Gtk.Label(xalign=0.0, label="")
+        self._corpo.set_wrap(True)
+        self._corpo.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self._corpo.set_selectable(True)
+        self._corpo.add_css_class("think-body")
+
+        self._scroll = Gtk.ScrolledWindow()
+        self._scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self._scroll.set_propagate_natural_height(True)
+        self._scroll.set_max_content_height(THINK_MAX_H)
+        self._scroll.set_child(self._corpo)
+
+        self._revealer = Gtk.Revealer()
+        self._revealer.set_transition_type(
+            Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self._revealer.set_transition_duration(180)
+        self._revealer.set_child(self._scroll)
+        self._revealer.set_reveal_child(False)
+        self.append(self._revealer)
+
+    # -- api -------------------------------------------------------------
+    @property
+    def texto(self):
+        return self._texto
+
+    def acrescentar(self, texto):
+        if not texto:
+            return
+        if self._t0 is None:
+            self._t0 = time.monotonic()
+            self._iniciar_pulso()
+        self._texto += texto
+        self._corpo.set_text(self._texto)
+        adj = self._scroll.get_vadjustment()
+        if adj is not None:
+            GLib.idle_add(self._colar_no_fim, adj)
+
+    def _colar_no_fim(self, adj):
+        adj.set_value(max(0.0, adj.get_upper() - adj.get_page_size()))
+        return GLib.SOURCE_REMOVE
+
+    def abrir(self, aberto):
+        self._aberto = bool(aberto)
+        self._revealer.set_reveal_child(self._aberto)
+        self._chevron.set_from_icon_name(
+            "pan-down-symbolic" if self._aberto else "pan-end-symbolic")
+
+    def concluir(self):
+        """Parou de pensar: congela o tempo e troca o texto pelo resumo."""
+        if self._t0 is not None and not self._decorrido:
+            self._decorrido = time.monotonic() - self._t0
+        self._parar_pulso()
+        if self._decorrido >= 0.1:
+            self._rotulo.set_text("Pensou por %s" % _duracao(self._decorrido))
+        else:
+            self._rotulo.set_text("Raciocinio")
+
+    # -- animacao --------------------------------------------------------
+    def _iniciar_pulso(self):
+        if self._tick_id:
+            return
+        self._rotulo.add_css_class("think-live")
+        self._tick_id = GLib.timeout_add(400, self._pulsar)
+
+    def _pulsar(self):
+        self._tick = (self._tick + 1) % len(self._PASSOS)
+        self._rotulo.set_text("Pensando" + self._PASSOS[self._tick])
+        return GLib.SOURCE_CONTINUE
+
+    def _parar_pulso(self):
+        if self._tick_id:
+            GLib.source_remove(self._tick_id)
+            self._tick_id = 0
+        self._rotulo.remove_css_class("think-live")
+
+    def _alternar(self, _btn):
+        self.abrir(not self._aberto)
+
+
+def _duracao(segundos):
+    if segundos < 60:
+        return "%ds" % round(segundos)
+    minutos, resto = divmod(int(round(segundos)), 60)
+    return "%dmin %02ds" % (minutos, resto)
+
+
 class MessageRow(Gtk.Box):
     """One conversation entry: tinted header strip + full-width body."""
 
@@ -1234,6 +1448,7 @@ class MessageRow(Gtk.Box):
         self.msg_id = msg_id
         self.content = content or ""
         self._error = False
+        self._streaming = False
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         header.add_css_class("msg-header")
@@ -1298,6 +1513,16 @@ class MessageRow(Gtk.Box):
             self._markdown = MarkdownView(show_line_numbers=show_line_numbers)
             body.append(self._markdown)
 
+        # Modelos de raciocinio (qwen3, o-series, Claude com thinking) emitem
+        # o rascunho antes da resposta. Sem isso a bolha fica vazia enquanto
+        # eles pensam -- e vazia de vez se o raciocinio consumir todo o
+        # orcamento de tokens.
+        self._think_exp = None
+        if role == ROLE_ASSISTANT:
+            self._think_exp = ThinkingBlock()
+            self._think_exp.set_visible(False)
+            body.append(self._think_exp)
+
         self._spinner = Gtk.Spinner()
         self._spinner.set_halign(Gtk.Align.START)
         self._spinner.set_visible(False)
@@ -1314,8 +1539,36 @@ class MessageRow(Gtk.Box):
     def append_content(self, text):
         if not text:
             return
+        # A resposta comecou: o rascunho para de pulsar, vira "Pensou por Xs"
+        # e se recolhe -- continua a um clique de distancia.
+        if self._think_exp is not None and not self.content and self._think_exp.texto:
+            self._think_exp.concluir()
+            self._think_exp.abrir(False)
         self.content += text
         self._render()
+
+    def append_thinking(self, text):
+        """Acumula o rascunho do modelo no bloco de raciocinio."""
+        if not text or self._think_exp is None:
+            return
+        primeiro = not self._think_exp.get_visible()
+        self._think_exp.acrescentar(text)
+        if primeiro:
+            self._think_exp.set_visible(True)
+            # so abre sozinho enquanto nao ha resposta: e o unico sinal de
+            # que o modelo esta trabalhando
+            self._think_exp.abrir(not self.content)
+        if not self.content:
+            self._spinner.set_visible(False)
+            self._spinner.stop()
+
+    def finish_thinking(self):
+        if self._think_exp is not None and self._think_exp.texto:
+            self._think_exp.concluir()
+
+    @property
+    def thinking(self):
+        return self._think_exp.texto if self._think_exp is not None else ""
 
     def set_metricas(self, espera, geracao, vel):
         """Mostra o custo desta resposta: espera + geracao + tok/s dela."""
@@ -1329,6 +1582,10 @@ class MessageRow(Gtk.Box):
         self._metricas_label.set_visible(True)
 
     def set_streaming(self, streaming):
+        antes = self._streaming
+        self._streaming = bool(streaming)
+        if antes and not self._streaming:
+            self._render()          # a fórmula final entra inteira
         if streaming:
             self.add_css_class("streaming")
             if not self.content.strip():
@@ -1352,7 +1609,10 @@ class MessageRow(Gtk.Box):
     # -- internals -------------------------------------------------------
     def _render(self):
         if self._markdown is not None:
-            self._markdown.set_markdown(self.content)
+            texto = self.content
+            if self._streaming:
+                texto = _corta_math_incompleta(texto)
+            self._markdown.set_markdown(texto)
             if self.content.strip():
                 self._spinner.stop()
                 self._spinner.set_visible(False)
@@ -1539,6 +1799,7 @@ COMANDOS = [
     ("/side",      "left|right",          "borda em que o painel abre"),
     ("/width",     "35 | 700px",           "largura do painel"),
     ("/velocidade","",                    "tokens/s medio por modelo"),
+    ("/think",     "auto|on|off|low|medium|high", "rascunho dos modelos de raciocinio"),
     ("/restart",   "",                    "reinicia o hyde-ai"),
 ]
 
@@ -1575,6 +1836,7 @@ class Sidebar(Gtk.ApplicationWindow):
         self._worker = None
         self._active_row = None
         self._pending_deltas = []
+        self._done_reason = None
         self._pending_lock = threading.Lock()
         self._flush_id = 0
         self._follow = True
@@ -1670,8 +1932,19 @@ class Sidebar(Gtk.ApplicationWindow):
         self.set_child(root)
 
         root.append(self._build_header())
-        root.append(self._build_banner())
-        root.append(self._build_chat())
+
+        # O banner flutua SOBRE a conversa. Como irmao numa caixa vertical ele
+        # empurrava tudo para baixo ao aparecer e puxava de volta ao sumir --
+        # a conversa dava um salto a cada aviso.
+        corpo = Gtk.Overlay()
+        corpo.set_vexpand(True)
+        corpo.set_child(self._build_chat())
+        banner = self._build_banner()
+        banner.set_halign(Gtk.Align.FILL)
+        banner.set_valign(Gtk.Align.START)
+        corpo.add_overlay(banner)
+        root.append(corpo)
+
         root.append(self._build_input())
 
     def _build_header(self):
@@ -1847,6 +2120,18 @@ class Sidebar(Gtk.ApplicationWindow):
 
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         controls.add_css_class("input-controls")
+
+        # Ligar/desligar o rascunho e uma decisao por pergunta, nao de
+        # configuracao: "quanto vale esperar" muda a cada uma. Por isso mora
+        # aqui, ao lado do envio, e nao enterrado num arquivo.
+        self._think_sync = False
+        self._think_btn = Gtk.ToggleButton()
+        self._think_btn.set_child(Gtk.Image.new_from_icon_name("weather-clear-symbolic"))
+        self._think_btn.add_css_class("flat")
+        self._think_btn.add_css_class("think-btn")
+        self._think_btn.connect("toggled", self._on_think_toggled)
+        controls.append(self._think_btn)
+        self._sync_think_btn()
 
         controls.append(_spacer())
 
@@ -2032,6 +2317,50 @@ class Sidebar(Gtk.ApplicationWindow):
         end = self._input_buffer.get_end_iter()
         self._input_buffer.place_cursor(end)
 
+    def _think_ligado(self):
+        modo = str(self.config.get("ollama.think", "off") or "off").lower()
+        return modo not in ("off", "false", "no", "0")
+
+    def _sync_think_btn(self):
+        """Reflete a config no botao sem disparar o handler de volta."""
+        btn = getattr(self, "_think_btn", None)
+        if btn is None:
+            return
+        ligado = self._think_ligado()
+        # set_active() emite "toggled"; a trava evita que refletir a config
+        # no botao acabe reescrevendo a propria config.
+        self._think_sync = True
+        try:
+            btn.set_active(ligado)
+        finally:
+            self._think_sync = False
+        modo = str(self.config.get("ollama.think", "off") or "off").lower()
+        if ligado:
+            btn.set_tooltip_text(
+                "Raciocinio: %s - o modelo rascunha antes de responder "
+                "(clique para desligar)" % modo)
+            btn.remove_css_class("think-off")
+        else:
+            btn.set_tooltip_text(
+                "Raciocinio desligado - respostas mais rapidas "
+                "(clique para religar)")
+            btn.add_css_class("think-off")
+        # So o Ollama expoe esse controle no protocolo.
+        btn.set_visible(self.history.provider == "ollama")
+
+    def _on_think_toggled(self, btn):
+        if getattr(self, "_think_sync", False):
+            return
+        self.config.set("ollama.think", "on" if btn.get_active() else "off")
+        try:
+            self.config.save()
+        except Exception as exc:
+            _warn("config.save failed: %r" % (exc,))
+        self._sync_think_btn()
+        self.show_banner(
+            "Raciocinio ligado" if btn.get_active() else "Raciocinio desligado",
+            2500)
+
     def _on_input_changed(self, _buffer):
         # May fire before the rest of the input area exists; stay defensive.
         placeholder = getattr(self, "_input_placeholder", None)
@@ -2180,6 +2509,8 @@ class Sidebar(Gtk.ApplicationWindow):
         else:
             self._status_label.set_text(active_model or "")
         self._update_send_state()
+
+        self._sync_think_btn()
 
     def set_edge(self, side):
         """Move the panel to the given screen edge and persist the choice."""
@@ -2376,8 +2707,16 @@ class Sidebar(Gtk.ApplicationWindow):
         if self._paleta is not None and self._paleta.get_visible():
             self._paleta.popdown()
 
-    def _abrir_historico(self, ancora):
-        """Lista as conversas salvas, agrupadas por provedor."""
+    def _abrir_historico(self, ancora=None):
+        """Lista as conversas salvas, agrupadas por provedor.
+
+        Sem ancora, reabre no botao usado da ultima vez -- e assim que a lista
+        volta sozinha depois de excluir uma conversa.
+        """
+        ancora = ancora or getattr(self, "_hist_ancora", None)
+        if ancora is None:
+            return
+        self._hist_ancora = ancora
         pop = Gtk.Popover()
         pop.add_css_class("selector-popover")
         pop.set_size_request(360, -1)
@@ -2447,11 +2786,42 @@ class Sidebar(Gtk.ApplicationWindow):
             corpo.append(sub)
 
             linha.set_child(corpo)
+            linha.set_hexpand(True)
             cid = it["id"]
             linha.connect("clicked", lambda _b, i=cid, p=pop: self._restaurar(i, p))
-            caixa.append(linha)
+
+            # Excluir fica na propria linha, nao num menu: e a acao que se
+            # procura olhando para a conversa que se quer tirar dali.
+            apagar = _icon_button("edit-delete-symbolic", "Excluir esta conversa")
+            apagar.add_css_class("historico-apagar")
+            apagar.set_valign(Gtk.Align.CENTER)
+            apagar.connect("clicked",
+                           lambda _b, i=cid, p=pop: self._apagar_conversa(i, p))
+
+            par = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+            par.append(linha)
+            if not it["atual"]:          # a conversa aberta nao se apaga
+                par.append(apagar)
+            caixa.append(par)
 
         pop.popup()
+
+    def _apagar_conversa(self, conv_id, pop):
+        try:
+            apagou = self.history.apagar(conv_id)
+        except Exception as exc:
+            _warn("nao consegui apagar a conversa: %r" % (exc,))
+            return
+        if not apagou:
+            return
+        try:
+            self.history.save()
+        except Exception as exc:
+            _warn("history.save falhou: %r" % (exc,))
+        pop.popdown()
+        self.show_banner("Conversa excluida.", timeout_ms=2500)
+        # reabre a lista ja sem ela, para apagar varias de uma vez
+        GLib.timeout_add(180, lambda: (self._abrir_historico(), GLib.SOURCE_REMOVE)[1])
 
     def _restaurar(self, conv_id, pop):
         try:
@@ -2846,6 +3216,34 @@ class Sidebar(Gtk.ApplicationWindow):
             self._add_interface("Provider set to **%s**." % provider.name)
             return True
 
+        if cmd == "think":
+            validos = ("auto", "on", "off", "low", "medium", "high")
+            atual = str(self.config.get("ollama.think", "off") or "off").lower()
+            if not args:
+                self._add_interface(
+                    "## Raciocinio\n\n"
+                    "Agora: `%s`\n\n"
+                    "- `auto` - o modelo decide\n"
+                    "- `off` - sem rascunho, respostas bem mais rapidas\n"
+                    "- `on` - forca o rascunho\n"
+                    "- `low` / `medium` / `high` - esforco, nos modelos que aceitam\n\n"
+                    "Troque com `/think off`. Vale para o Ollama; "
+                    "Claude e Gemini tem os proprios ajustes." % atual)
+                return True
+            escolha = args[0].lower()
+            if escolha not in validos:
+                self._add_interface("`%s` nao serve. Use: %s."
+                                    % (escolha, ", ".join("`%s`" % v for v in validos)))
+                return True
+            self.config.set("ollama.think", escolha)
+            try:
+                self.config.save()
+            except Exception as exc:
+                _warn("config.save failed: %r" % (exc,))
+            self._sync_think_btn()
+            self.show_banner("Raciocinio: %s" % escolha, 3000)
+            return True
+
         if cmd == "model":
             pid = self.history.provider
             try:
@@ -3037,17 +3435,36 @@ class Sidebar(Gtk.ApplicationWindow):
     def _stream_worker(self, seq, provider_id, model_id, messages, system, cancel):
         """Runs OFF the main loop.  Never touches a widget directly."""
         error = None
+        self._done_reason = None
         try:
-            for delta in self.registry.stream(provider_id, model_id, messages, system, cancel):
+            # Nem todo registry expoe stream_events; cair para o stream de
+            # texto puro e melhor do que quebrar o envio.
+            eventos_fn = getattr(self.registry, "stream_events", None)
+            if callable(eventos_fn):
+                eventos = eventos_fn(
+                    provider_id, model_id, messages, system, cancel)
+            else:
+                eventos = _somente_texto(self.registry.stream(
+                    provider_id, model_id, messages, system, cancel))
+            for ev in eventos:
                 if cancel_is_set(cancel):
                     break
+                kind = getattr(ev, "kind", "text")
+                if kind == "usage":
+                    self._done_reason = (ev.data or {}).get("done_reason")
+                    continue
+                if kind not in ("text", "thinking"):
+                    continue
+                delta = ev.text
                 if not delta:
                     continue
+                # Tokens de raciocinio sao gerados como qualquer outro, entao
+                # contam para a velocidade; o que muda e onde eles aparecem.
                 if self._t_primeiro is None:
                     self._t_primeiro = time.monotonic()
                 self._n_tokens += 1
                 with self._pending_lock:
-                    self._pending_deltas.append(delta)
+                    self._pending_deltas.append((kind, delta))
                     schedule = self._flush_id == 0
                     if schedule:
                         self._flush_id = -1
@@ -3057,16 +3474,34 @@ class Sidebar(Gtk.ApplicationWindow):
             error = str(exc) or exc.__class__.__name__
         GLib.idle_add(self._on_stream_done, seq, error, cancel_is_set(cancel))
 
-    def _flush_deltas(self, seq):
+    def _drenar_pendentes(self):
+        """Junta os deltas acumulados, preservando a ordem entre os tipos."""
         with self._pending_lock:
-            chunk = "".join(self._pending_deltas)
+            itens = self._pending_deltas
             self._pending_deltas = []
             self._flush_id = 0
-        if not chunk:
+        blocos = []
+        for kind, texto in itens:
+            if blocos and blocos[-1][0] == kind:
+                blocos[-1][1].append(texto)
+            else:
+                blocos.append((kind, [texto]))
+        return [(k, "".join(partes)) for k, partes in blocos]
+
+    def _aplicar_blocos(self, row, blocos):
+        for kind, texto in blocos:
+            if kind == "thinking":
+                row.append_thinking(texto)
+            else:
+                row.append_content(texto)
+
+    def _flush_deltas(self, seq):
+        blocos = self._drenar_pendentes()
+        if not blocos:
             return GLib.SOURCE_REMOVE
         if seq != self._stream_seq or self._active_row is None:
             return GLib.SOURCE_REMOVE
-        self._active_row.append_content(chunk)
+        self._aplicar_blocos(self._active_row, blocos)
         try:
             self.history.replace_last_content(self._active_row.content)
         except Exception as exc:
@@ -3078,13 +3513,27 @@ class Sidebar(Gtk.ApplicationWindow):
             return GLib.SOURCE_REMOVE
 
         # Drain anything still buffered.
-        with self._pending_lock:
-            chunk = "".join(self._pending_deltas)
-            self._pending_deltas = []
-            self._flush_id = 0
+        blocos = self._drenar_pendentes()
         row = self._active_row
-        if row is not None and chunk:
-            row.append_content(chunk)
+        if row is not None and blocos:
+            self._aplicar_blocos(row, blocos)
+
+        if row is not None:
+            row.finish_thinking()
+
+        # Um modelo de raciocinio que gasta todo o orcamento pensando termina
+        # sem resposta nenhuma. Sem este aviso a bolha fica vazia e sem
+        # explicacao.
+        if (row is not None and not error and not cancelled
+                and not row.content.strip() and getattr(row, "thinking", "")):
+            if self._done_reason == "length":
+                self.show_banner(
+                    "The model used the whole token budget on reasoning and never "
+                    "reached an answer — raise max_tokens in the config.",
+                    timeout_ms=0,
+                )
+            else:
+                self.show_banner("The model returned only reasoning, no answer.", 6000)
 
         # metricas desta resposta: tempo ate o 1o token (o "pensando") e a
         # velocidade de geracao dela propria

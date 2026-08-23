@@ -18,6 +18,12 @@
     "width_min": 420,
     "width_max": 900
   },
-  "max_tokens": 4096,
-  "request": { "connect_timeout": 15.0, "read_timeout": 180.0 }
+  "max_tokens": 8192,
+  "request": {
+    "connect_timeout": 15.0,
+    "read_timeout": 180.0
+  },
+  "ollama": {
+    "think": "off"
+  }
 }

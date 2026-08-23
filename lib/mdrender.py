@@ -27,7 +27,12 @@ def _novo_md():
     md = MarkdownIt("commonmark")
     md.enable(["table", "strikethrough"])
     if _TEM_MATH:
-        md = md.use(dollarmath_plugin, double_inline=True)
+        # allow_space=False: o "$" de fechamento nao pode vir depois de um
+        # espaco, senao "a variavel $HOME ... e $PATH" vira uma formula.
+        # allow_digits=False: "$1", "$2" de shell e "$5" de dinheiro tambem
+        # deixam de ser confundidos com matematica.
+        md = md.use(dollarmath_plugin, double_inline=True,
+                    allow_space=False, allow_digits=False)
     return md
 
 
@@ -108,6 +113,8 @@ def _inline_markup(token):
                 out.append(_inline_math_hook(t.content))
             else:
                 out.append("<i>%s</i>" % _esc(t.content))
+        elif tipo in ("softbreak", "hardbreak"):
+            out.append("\n")
         elif tipo == "image":
             out.append(_esc(t.attrGet("alt") or ""))
         elif tipo == "html_inline":
@@ -126,6 +133,53 @@ def _inline_markup(token):
     return texto
 
 
+def _partir_display(inline):
+    """Quebra um paragrafo em trechos de prosa e formulas de display.
+
+    Devolve pares ("texto"|"math", conteudo) na ordem em que aparecem. Um
+    paragrafo sem $$ volta como um unico par de texto, igual a antes.
+    """
+    filhos = inline.children or []
+    if not any(c.type in ("math_inline_double", "math_block") for c in filhos):
+        return [("texto", _inline_markup(inline))]
+
+    partes = []
+    corrente = []
+
+    def fecha():
+        if not corrente:
+            return
+        falso = _InlineFalso(corrente)
+        markup = _inline_markup(falso).strip("\n")
+        if markup.strip():
+            partes.append(("texto", markup))
+        corrente.clear()
+
+    for filho in filhos:
+        if filho.type in ("math_inline_double", "math_block"):
+            fecha()
+            conteudo = (filho.content or "").strip()
+            if conteudo:
+                partes.append(("math", conteudo))
+        elif filho.type in ("softbreak", "hardbreak") and not corrente:
+            continue          # quebra colada na formula: nao vira linha vazia
+        else:
+            corrente.append(filho)
+    fecha()
+    return partes
+
+
+class _InlineFalso(object):
+    """Token inline sintetico, so com os filhos de um trecho."""
+
+    __slots__ = ("children", "content", "type")
+
+    def __init__(self, filhos):
+        self.children = list(filhos)
+        self.content = ""
+        self.type = "inline"
+
+
 _TAM_TITULO = {1: "x-large", 2: "large", 3: "large", 4: "medium",
                5: "medium", 6: "medium"}
 
@@ -137,7 +191,15 @@ _TEX_ESTRUTURA = re.compile(
     # (?![a-zA-Z]) e nao \b: em "\iint_{" o underscore conta como caractere
     # de palavra, entao \b nao casava e a formula passava batido
     r"\\(?:iint|int|sum|prod|frac|sqrt|lim|oint|partial|nabla|left|binom)(?![a-zA-Z])")
-_PALAVRA = re.compile(r"(?<![\\{])\b[a-z\u00e0-\u00ff]{4,}\b")
+# Palavra de prosa: 4+ letras, inicial podendo ser maiuscula. Aceitar a
+# maiuscula importa -- "Resposta:" abre frase o tempo todo, e casar so
+# minusculas fazia a linha inteira ser lida como formula. Siglas em caixa
+# alta (LHS, QED) e nomes de comando seguem de fora.
+_PALAVRA = re.compile(r"(?<![\\{])\b[A-Za-z\u00c0-\u00ff][a-z\u00e0-\u00ff]{3,}\b")
+
+# Enfase, titulo ou item de lista sao marcas de texto; uma formula solta
+# nunca as carrega, e o renderizador de TeX nao sabe o que fazer com elas.
+_MARCA_MD = re.compile(r"\*\*|__|^\s*(?:[-*+]\s|\d+\.\s|#{1,6}\s)", re.M)
 
 
 def _parece_formula(txt):
@@ -145,6 +207,8 @@ def _parece_formula(txt):
     if not t or "\\" not in t or len(t) > 400:
         return False
     if not _TEX_ESTRUTURA.search(t):
+        return False
+    if _MARCA_MD.search(t):
         return False
     # remove comandos e chaves; o que sobrar de palavra longa indica prosa
     limpo = re.sub(r"\\[A-Za-z]+", " ", t)
@@ -186,17 +250,29 @@ def segmentos(texto):
                        % (_TAM_TITULO.get(nivel, "medium"), corpo))
             i += 2
         elif t.type == "paragraph_open":
-            bruto = tokens[i + 1].content or ""
-            if _parece_formula(bruto):
+            inline = tokens[i + 1]
+            bruto = inline.content or ""
+            # _parece_formula existe para TeX solto, sem delimitador. Se o
+            # parser ja achou $...$ ou $$...$$ aqui, ele entendeu melhor do
+            # que a heuristica -- nao passar por cima.
+            ja_delimitado = any(
+                c.type in ("math_inline", "math_inline_double", "math_block")
+                for c in (inline.children or []))
+            if not ja_delimitado and _parece_formula(bruto):
                 descarrega()
                 segs.append(("math", bruto.strip()))
                 i += 2
                 continue
-            corpo = _inline_markup(tokens[i + 1])
-            if nivel_lista:
-                buf.append(corpo)
-            else:
-                buf.append(corpo)
+            # Os modelos escrevem $$...$$ na mesma linha da frase, sem linha
+            # em branco antes. O markdown-it entrega isso como um token inline
+            # (math_inline_double) e nao como bloco; sem tratar aqui a formula
+            # sai crua no meio do texto.
+            for tipo_p, corpo_p in _partir_display(inline):
+                if tipo_p == "math":
+                    descarrega()
+                    segs.append(("math", corpo_p))
+                elif corpo_p:
+                    buf.append(corpo_p)
             i += 2
         elif t.type == "fence" and (t.info or "").strip().lower() in (
                 "math", "latex", "tex", "equation"):

@@ -473,6 +473,23 @@ def _as_model(raw):
     )
 
 
+class _TextEvent(object):
+    """Evento minimo, para registries que so devolvem texto."""
+
+    __slots__ = ("kind", "text", "data")
+
+    def __init__(self, text):
+        self.kind = "text"
+        self.text = text
+        self.data = {}
+
+
+def _as_text_events(deltas):
+    for delta in deltas:
+        if delta:
+            yield _TextEvent(delta)
+
+
 class RegistryProxy(object):
     """Normalises ``providers.py`` onto the interface the sidebar consumes."""
 
@@ -691,6 +708,17 @@ class RegistryProxy(object):
             raise RuntimeError("providers.py exposes no stream()/stream_chat()")
         return streamer(pid, model_id, messages, system, cancel)
 
+    def stream_events(self, pid, model_id, messages, system, cancel):
+        """Deltas rotulados: text, thinking, usage.
+
+        Um registry que so saiba texto puro continua funcionando -- os deltas
+        sao embrulhados como eventos de texto.
+        """
+        events = getattr(self._inner, "stream_events", None)
+        if callable(events):
+            return events(pid, model_id, messages, system, cancel)
+        return _as_text_events(self.stream(pid, model_id, messages, system, cancel))
+
 
 class EmptyRegistry(object):
     """Stand-in used when providers.py is missing or unusable."""
@@ -728,6 +756,9 @@ class EmptyRegistry(object):
         return threading.Event()
 
     def stream(self, pid, model_id, messages, system, cancel):
+        raise RuntimeError(self.reason)
+
+    def stream_events(self, pid, model_id, messages, system, cancel):
         raise RuntimeError(self.reason)
 
 
