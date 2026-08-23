@@ -132,6 +132,7 @@ você escreve.
 | `/key <provedor> <valor>` | guarda uma chave de API |
 | `/velocidade` | tokens/s médio por modelo |
 | `/refresh` | reprocura provedores e modelos |
+| `/agente on\|off` | deixa o modelo rodar comandos aqui |
 | `/side left\|right` · `/width 35` | geometria do painel |
 
 Da linha de comando, `hyde-ai --ask "sua pergunta"` abre o painel e envia a
@@ -176,6 +177,57 @@ dentro.
 Sem isso a bolha ficaria vazia durante todo o raciocínio, e vazia para sempre
 se o rascunho consumisse todo o `max_tokens`. Quando isso acontece, o painel
 diz o que houve em vez de deixar a mensagem em branco.
+
+---
+
+## Modo agente
+
+Ligado, o modelo pode **rodar comandos nesta máquina** para responder. Ele
+encadeia chamadas: olha o estado, decide o próximo passo, e só então responde.
+
+```
+Você: por que o coletor de métricas parou?
+
+  ▸ shell   systemctl --user status hyde-widgets-collector      ok
+  ▸ shell   journalctl --user -u hyde-widgets-collector -n 30   ok
+
+O caminho da GPU mudou de card1 para card2 depois do último
+boot, e o coletor não encontra mais o sensor.
+```
+
+**Desligado por padrão.** O botão de terminal ao lado do envio liga, ou
+`/agente on`. Só o Ollama, com modelos que anunciam `tools` — o `ollama show`
+mostra quais.
+
+### O que ele pode rodar sozinho
+
+Comando de leitura roda direto. Qualquer coisa que altere o sistema mostra o
+comando exato e espera **Permitir** ou **Negar**:
+
+```
+  ▸ shell   sed -i 's/card1/card2/' collector
+            [ Negar ]  [ Permitir ]
+```
+
+A classificação é uma lista fechada de comandos de leitura, aplicada a **cada
+segmento** da linha — um `ls | sh` não passa porque `sh` não está na lista.
+Redirecionamento (`>`), substituição de comando (`` ` ``, `$(...)`), `sudo`,
+`python3 -c` e subcomandos que escrevem (`git push`, `systemctl restart`,
+`pacman -S`) caem todos na confirmação. Comando desconhecido também: a regra
+erra de propósito para o lado de perguntar.
+
+Negar não é o fim — o modelo recebe a recusa como resultado e explica o que
+faria, em vez de tentar de novo.
+
+```bash
+python3 tests/test_agente.py     # 66 comandos contra o portão de segurança
+```
+
+| Config | |
+|---|---|
+| `agent.enabled` | ligado ou não (padrão: não) |
+| `agent.max_steps` | teto de idas e voltas por pergunta (padrão: 8) |
+| `agent.timeout` | segundos por comando (padrão: 45) |
 
 ---
 

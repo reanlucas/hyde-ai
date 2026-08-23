@@ -25,5 +25,10 @@
   },
   "ollama": {
     "think": "off"
+  },
+  "agent": {
+    "enabled": false,
+    "max_steps": 8,
+    "timeout": 45
   }
 }

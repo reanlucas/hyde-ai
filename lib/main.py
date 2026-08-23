@@ -708,15 +708,19 @@ class RegistryProxy(object):
             raise RuntimeError("providers.py exposes no stream()/stream_chat()")
         return streamer(pid, model_id, messages, system, cancel)
 
-    def stream_events(self, pid, model_id, messages, system, cancel):
-        """Deltas rotulados: text, thinking, usage.
+    def stream_events(self, pid, model_id, messages, system, cancel, tools=None):
+        """Deltas rotulados: text, thinking, usage, tool.
 
         Um registry que so saiba texto puro continua funcionando -- os deltas
-        sao embrulhados como eventos de texto.
+        sao embrulhados como eventos de texto, e as ferramentas sao ignoradas.
         """
         events = getattr(self._inner, "stream_events", None)
         if callable(events):
-            return events(pid, model_id, messages, system, cancel)
+            try:
+                return events(pid, model_id, messages, system, cancel, tools)
+            except TypeError:
+                # registry antigo, sem ferramentas: segue sem elas
+                return events(pid, model_id, messages, system, cancel)
         return _as_text_events(self.stream(pid, model_id, messages, system, cancel))
 
 
@@ -758,7 +762,7 @@ class EmptyRegistry(object):
     def stream(self, pid, model_id, messages, system, cancel):
         raise RuntimeError(self.reason)
 
-    def stream_events(self, pid, model_id, messages, system, cancel):
+    def stream_events(self, pid, model_id, messages, system, cancel, tools=None):
         raise RuntimeError(self.reason)
 
 
@@ -909,6 +913,32 @@ class History(object):
         if role == "assistant":
             record["provider"] = self.provider
             record["model"] = self.model
+        self.messages.append(record)
+        return record
+
+    def add_tool_call(self, chamadas):
+        """Turno do assistente que so pediu ferramentas, sem texto."""
+        record = {
+            "id": uuid.uuid4().hex,
+            "role": "assistant",
+            "content": "",
+            "tool_calls": list(chamadas),
+            "ts": time.time(),
+            "provider": self.provider,
+            "model": self.model,
+        }
+        self.messages.append(record)
+        return record
+
+    def add_tool_result(self, nome, conteudo):
+        """Resposta da ferramenta, que volta ao modelo no proximo passo."""
+        record = {
+            "id": uuid.uuid4().hex,
+            "role": "tool",
+            "tool_name": nome,
+            "content": conteudo or "",
+            "ts": time.time(),
+        }
         self.messages.append(record)
         return record
 

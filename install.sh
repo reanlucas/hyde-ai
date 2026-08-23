@@ -50,7 +50,22 @@ else
 fi
 
 echo "==> Cores do tema"
+# O painel le ~/.cache/hyde/wallbash/hyde-ai.css. Sem esse arquivo ele nasce
+# sem estilo nenhum -- fonte do sistema, sem cores -- e so se conserta quando
+# o usuario troca de tema por conta propria. "hyde-shell reload" nem sempre
+# passa pelos templates, entao reaplicar o tema atual e o caminho garantido.
 hyde-shell reload >/dev/null 2>&1 || true
+CSS="${XDG_CACHE_HOME:-$HOME/.cache}/hyde/wallbash/hyde-ai.css"
+if [ ! -s "$CSS" ] || ! grep -q "tool-cmd" "$CSS" 2>/dev/null; then
+    TEMA="$(sed -n 's/^HYDE_THEME="\(.*\)"$/\1/p' \
+            "${XDG_STATE_HOME:-$HOME/.local/state}/hyde/staterc" 2>/dev/null)"
+    SWITCH="$HOME/.local/lib/hyde/theme.switch.sh"
+    if [ -n "$TEMA" ] && [ -x "$SWITCH" ]; then
+        "$SWITCH" -s "$TEMA" >/dev/null 2>&1 || true
+    fi
+fi
+[ -s "$CSS" ] && echo "    stylesheet em $CSS" \
+              || echo "    AVISO: stylesheet nao gerada -- troque de tema uma vez"
 
 echo "==> Verificacao"
 "$BIN/hyde-ai" --doctor 2>&1 | grep -E '\[ *(ok|warn|--) *\]' | head -20 || true

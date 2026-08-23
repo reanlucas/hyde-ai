@@ -125,6 +125,56 @@ window, window.background { background-color: transparent; }
 }
 
 /* toggle do raciocinio, ao lado do envio */
+/* toggle do modo agente, irmao do raciocinio */
+.agent-btn {
+  padding: 3px;
+  min-width: 22px;
+  min-height: 22px;
+  border-radius: 8px;
+  color: @ha_ok;
+  background: none;
+  border: none;
+  box-shadow: none;
+}
+.agent-btn image { -gtk-icon-size: 14px; }
+.agent-btn:hover { background-color: alpha(@ha_layer1, 0.55); }
+.agent-btn.agent-off { color: @ha_fg_ghost; }
+
+/* ── ferramentas do agente ─────────────────────────────────────────────── */
+.tool {
+  background-color: alpha(@ha_layer1, 0.45);
+  border: 1px solid alpha(@ha_border, 0.30);
+  border-left: 3px solid alpha(@ha_fg, 0.25);
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin: 4px 0;
+}
+/* Espera de permissao chama atencao; o resto fica discreto. */
+.tool.tool-espera { border-left-color: @ha_accent;
+                    background-color: alpha(@ha_accent_low, 0.30); }
+.tool.tool-ok     { border-left-color: @ha_ok; }
+.tool.tool-erro   { border-left-color: @ha_error; }
+
+.tool-icon  { color: @ha_fg_faint; -gtk-icon-size: 12px; }
+.tool-title { font-size: 11px; font-weight: 600; color: @ha_fg_faint; }
+.tool-state { font-size: 11px; color: @ha_fg_ghost; }
+.tool-cmd {
+  font-family: "CaskaydiaCove Nerd Font Mono", monospace;
+  font-size: 12px;
+  color: @ha_fg;
+  padding: 2px 0;
+}
+.tool-out {
+  font-family: "CaskaydiaCove Nerd Font Mono", monospace;
+  font-size: 11px;
+  color: @ha_fg_muted;
+}
+.tool-exp > title > label { font-size: 11px; color: @ha_fg_ghost; }
+.tool-permitir { min-height: 0; padding: 3px 14px; border-radius: 8px; }
+.tool-negar    { min-height: 0; padding: 3px 14px; border-radius: 8px;
+                 background: none; color: @ha_fg_muted; }
+.tool-negar:hover { background-color: alpha(@ha_error, 0.18); color: @ha_error; }
+
 .think-btn {
   padding: 3px;
   min-width: 22px;

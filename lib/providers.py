@@ -162,6 +162,8 @@ class Event:
         ``"thinking"`` -- reasoning delta (Claude/Gemini/Ollama expose this)
         ``"usage"``    -- token accounting; payload in ``data``
         ``"meta"``     -- provider bookkeeping (model name, response id, ...)
+        ``"tool"``     -- the model asked for a tool; ``data`` carries
+                          ``id``, ``name`` and ``arguments``
     """
 
     __slots__ = ("kind", "text", "data")
@@ -483,16 +485,23 @@ def _clean_messages(messages: Sequence[Dict[str, Any]]) -> List[Dict[str, str]]:
         if not isinstance(item, dict):
             continue
         role = str(item.get("role") or "user").lower()
-        if role not in ("user", "assistant"):
+        if role not in ("user", "assistant", "tool"):
             role = "user"
         content = item.get("content")
         if content is None:
             continue
         if not isinstance(content, str):
             content = str(content)
-        if not content.strip():
+        # Um turno de assistente que so pediu ferramenta vem sem texto; ele
+        # precisa sobreviver, senao o modelo perde o proprio pedido de vista.
+        if not content.strip() and not item.get("tool_calls"):
             continue
-        out.append({"role": role, "content": content})
+        turno = {"role": role, "content": content}
+        if item.get("tool_calls"):
+            turno["tool_calls"] = item["tool_calls"]
+        if role == "tool" and item.get("tool_name"):
+            turno["tool_name"] = item["tool_name"]
+        out.append(turno)
     return out
 
 
@@ -700,9 +709,10 @@ class Provider:
         model: str = "",
         system: str = "",
         cancel: Optional[CancelToken] = None,
+        tools: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Iterator[str]:
         """Yield visible text deltas. This is the chat view's entry point."""
-        for event in self.stream_events(messages, model, system, cancel):
+        for event in self.stream_events(messages, model, system, cancel, tools):
             if event.kind == "text" and event.text:
                 yield event.text
 
@@ -712,8 +722,13 @@ class Provider:
         model: str = "",
         system: str = "",
         cancel: Optional[CancelToken] = None,
+        tools: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Iterator[Event]:
-        """Yield typed events. Raises ProviderError on any failure."""
+        """Yield typed events. Raises ProviderError on any failure.
+
+        ``tools`` e repassado so aos provedores que sabem o que fazer com ele;
+        os outros ignoram, entao chamar sempre com ferramentas e seguro.
+        """
         model = (model or self.preferred_model() or "").strip()
         if not model:
             raise ProviderError("No model selected for %s." % self.name)
@@ -728,7 +743,8 @@ class Provider:
             raise ProviderError("There is nothing to send.")
 
         try:
-            for event in self._stream_impl(turns, model, system or "", cancel):
+            for event in self._stream_impl(turns, model, system or "", cancel,
+                                           tools=tools):
                 yield event
         except _Cancelled:
             return
@@ -749,6 +765,7 @@ class Provider:
         model: str,
         system: str,
         cancel: Optional[CancelToken],
+        tools: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Iterator[Event]:
         raise NotImplementedError
 
@@ -803,7 +820,7 @@ class AnthropicProvider(Provider):
             self.config.get("anthropic.base_url", "https://api.anthropic.com")
         ).rstrip("/")
 
-    def _stream_impl(self, messages, model, system, cancel):
+    def _stream_impl(self, messages, model, system, cancel, tools=None):
         connect_timeout, read_timeout = self._timeouts()
         turns = _strict_turns(messages)
         if not turns:
@@ -982,7 +999,7 @@ class GeminiProvider(Provider):
             )
         ).rstrip("/")
 
-    def _stream_impl(self, messages, model, system, cancel):
+    def _stream_impl(self, messages, model, system, cancel, tools=None):
         connect_timeout, read_timeout = self._timeouts()
         turns = _strict_turns(messages)
         if not turns:
@@ -1165,7 +1182,7 @@ class OpenAIProvider(Provider):
     def _extra_body(self) -> Dict[str, Any]:
         return {}
 
-    def _stream_impl(self, messages, model, system, cancel):
+    def _stream_impl(self, messages, model, system, cancel, tools=None):
         connect_timeout, read_timeout = self._timeouts()
 
         wire: List[Dict[str, str]] = []
@@ -1485,7 +1502,7 @@ class OllamaProvider(Provider):
             return chosen
         return available[0] if available else ""
 
-    def _stream_impl(self, messages, model, system, cancel):
+    def _stream_impl(self, messages, model, system, cancel, tools=None):
         connect_timeout, read_timeout = self._timeouts()
 
         wire: List[Dict[str, str]] = []
@@ -1510,6 +1527,8 @@ class OllamaProvider(Provider):
             "stream": True,
             "options": options,
         }
+        if tools:
+            payload["tools"] = list(tools)
         keep_alive = str(self.config.get("ollama.keep_alive", "") or "").strip()
         if keep_alive:
             payload["keep_alive"] = keep_alive
@@ -1556,6 +1575,22 @@ class OllamaProvider(Provider):
                     text = message.get("content")
                     if isinstance(text, str) and text:
                         yield Event("text", text)
+                    for chamada in (message.get("tool_calls") or []):
+                        fn = (chamada or {}).get("function") or {}
+                        nome = fn.get("name")
+                        if not nome:
+                            continue
+                        args = fn.get("arguments")
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except Exception:
+                                args = {"_raw": args}
+                        yield Event("tool", data={
+                            "id": chamada.get("id") or "",
+                            "name": nome,
+                            "arguments": args or {},
+                        })
 
                 if obj.get("done"):
                     saw_done = True
@@ -1819,12 +1854,13 @@ class ProviderRegistry:
         messages: Sequence[Dict[str, Any]],
         system: str = "",
         cancel: Optional[CancelToken] = None,
+        tools: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Iterator[Event]:
-        """As :meth:`stream`, but including thinking/usage events."""
+        """As :meth:`stream`, but including thinking/usage/tool events."""
         provider = self.provider(provider_id)
         if provider is None:
             raise ProviderError("There is no provider called %r." % provider_id)
-        return provider.stream_events(messages, model_id, system, cancel)
+        return provider.stream_events(messages, model_id, system, cancel, tools)
 
     def __len__(self) -> int:
         return len(self._providers)

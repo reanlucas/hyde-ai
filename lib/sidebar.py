@@ -100,6 +100,8 @@ ANIM_US = 240_000            # slide duration, microseconds
 DELTA_FLUSH_MS = 40          # streaming coalescing interval
 # teto do bloco de raciocinio, em px: mostra o suficiente sem engolir a tela
 THINK_MAX_H = 180
+# teto do bloco de saida de ferramenta, em px
+TOOL_MAX_H = 220
 
 ROLE_USER = "user"
 ROLE_ASSISTANT = "assistant"
@@ -750,6 +752,12 @@ try:
     import mathrender as _mathrender
 except Exception:  # pragma: no cover
     _mathrender = None
+
+# Ferramentas do modo agente. Ausente, o painel segue como chat puro.
+try:
+    import agent as _agent
+except Exception:  # pragma: no cover
+    _agent = None
 
 try:
     import speedstats as _vel
@@ -1427,6 +1435,103 @@ def _duracao(segundos):
     return "%dmin %02ds" % (minutos, resto)
 
 
+class ToolBlock(Gtk.Box):
+    """Uma chamada de ferramenta: o comando, o veredito e a saida.
+
+    Comando de leitura roda direto e aparece ja executado. Comando que altera
+    algo para aqui, com o texto exato a vista, e espera Permitir ou Negar -- a
+    decisao e do usuario, e ela precisa caber num olhar.
+    """
+
+    def __init__(self, cmd, precisa_ok, on_decisao):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.add_css_class("tool")
+        self._cmd = cmd or ""
+        self._on_decisao = on_decisao
+
+        cab = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        icone = Gtk.Image.new_from_icon_name("utilities-terminal-symbolic")
+        icone.add_css_class("tool-icon")
+        cab.append(icone)
+        self._titulo = Gtk.Label(xalign=0.0, label="shell")
+        self._titulo.add_css_class("tool-title")
+        cab.append(self._titulo)
+        cab.append(_spacer())
+        self._estado = Gtk.Label(xalign=1.0)
+        self._estado.add_css_class("tool-state")
+        cab.append(self._estado)
+        self.append(cab)
+
+        self._linha = Gtk.Label(xalign=0.0, label=self._cmd)
+        self._linha.add_css_class("tool-cmd")
+        self._linha.set_wrap(True)
+        self._linha.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self._linha.set_selectable(True)
+        self.append(self._linha)
+
+        self._botoes = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self._botoes.set_halign(Gtk.Align.END)
+        negar = Gtk.Button(label="Negar")
+        negar.add_css_class("tool-negar")
+        negar.connect("clicked", lambda _b: self._decidir(False))
+        permitir = Gtk.Button(label="Permitir")
+        permitir.add_css_class("suggested-action")
+        permitir.add_css_class("tool-permitir")
+        permitir.connect("clicked", lambda _b: self._decidir(True))
+        self._botoes.append(negar)
+        self._botoes.append(permitir)
+        self._botoes.set_visible(precisa_ok)
+        self.append(self._botoes)
+
+        self._saida = Gtk.Label(xalign=0.0, label="")
+        self._saida.add_css_class("tool-out")
+        self._saida.set_wrap(True)
+        self._saida.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self._saida.set_selectable(True)
+        rolo = Gtk.ScrolledWindow()
+        rolo.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        rolo.set_propagate_natural_height(True)
+        rolo.set_max_content_height(TOOL_MAX_H)
+        rolo.set_child(self._saida)
+        self._exp = Gtk.Expander(label="saida")
+        self._exp.add_css_class("tool-exp")
+        self._exp.set_child(rolo)
+        self._exp.set_visible(False)
+        self.append(self._exp)
+
+        self.marcar("aguardando" if precisa_ok else "rodando")
+
+    def _decidir(self, ok):
+        self._botoes.set_visible(False)
+        if callable(self._on_decisao):
+            self._on_decisao(ok)
+
+    def marcar(self, estado, codigo=None):
+        textos = {
+            "aguardando": "precisa da sua permissao",
+            "rodando": "rodando...",
+            "negado": "negado",
+        }
+        if estado == "pronto":
+            self._estado.set_text("ok" if not codigo else "saiu com %s" % codigo)
+        else:
+            self._estado.set_text(textos.get(estado, estado))
+        for c in ("tool-ok", "tool-erro", "tool-espera"):
+            self.remove_css_class(c)
+        if estado == "aguardando":
+            self.add_css_class("tool-espera")
+        elif estado == "pronto":
+            self.add_css_class("tool-erro" if codigo else "tool-ok")
+        elif estado == "negado":
+            self.add_css_class("tool-erro")
+
+    def mostrar_saida(self, texto):
+        self._saida.set_text(texto or "")
+        self._exp.set_visible(bool(texto))
+        # a saida importa quando algo deu errado; senao fica fora do caminho
+        self._exp.set_expanded(False)
+
+
 class MessageRow(Gtk.Box):
     """One conversation entry: tinted header strip + full-width body."""
 
@@ -1800,6 +1905,7 @@ COMANDOS = [
     ("/width",     "35 | 700px",           "largura do painel"),
     ("/velocidade","",                    "tokens/s medio por modelo"),
     ("/think",     "auto|on|off|low|medium|high", "rascunho dos modelos de raciocinio"),
+    ("/agente",    "on|off",              "deixa o modelo rodar comandos aqui"),
     ("/restart",   "",                    "reinicia o hyde-ai"),
 ]
 
@@ -2124,6 +2230,18 @@ class Sidebar(Gtk.ApplicationWindow):
         # Ligar/desligar o rascunho e uma decisao por pergunta, nao de
         # configuracao: "quanto vale esperar" muda a cada uma. Por isso mora
         # aqui, ao lado do envio, e nao enterrado num arquivo.
+        # Modo agente ao lado do raciocinio: as duas decisoes que mudam o que
+        # acontece com a proxima pergunta ficam juntas, na altura do envio.
+        self._agent_sync = False
+        self._agent_btn = Gtk.ToggleButton()
+        self._agent_btn.set_child(
+            Gtk.Image.new_from_icon_name("utilities-terminal-symbolic"))
+        self._agent_btn.add_css_class("flat")
+        self._agent_btn.add_css_class("agent-btn")
+        self._agent_btn.connect("toggled", self._on_agent_toggled)
+        controls.append(self._agent_btn)
+        self._sync_agent_btn()
+
         self._think_sync = False
         self._think_btn = Gtk.ToggleButton()
         self._think_btn.set_child(Gtk.Image.new_from_icon_name("weather-clear-symbolic"))
@@ -2316,6 +2434,41 @@ class Sidebar(Gtk.ApplicationWindow):
         self._input_buffer.set_text(text, -1)
         end = self._input_buffer.get_end_iter()
         self._input_buffer.place_cursor(end)
+
+    def _sync_agent_btn(self):
+        btn = getattr(self, "_agent_btn", None)
+        if btn is None:
+            return
+        ligado = bool(self.config.get("agent.enabled", False))
+        self._agent_sync = True
+        try:
+            btn.set_active(ligado)
+        finally:
+            self._agent_sync = False
+        if ligado:
+            btn.set_tooltip_text(
+                "Modo agente ligado — o modelo pode rodar comandos aqui; "
+                "o que altera o sistema pede permissão (clique para desligar)")
+            btn.remove_css_class("agent-off")
+        else:
+            btn.set_tooltip_text(
+                "Modo agente desligado — só conversa (clique para ligar)")
+            btn.add_css_class("agent-off")
+        # so o Ollama fala o protocolo de ferramentas por enquanto
+        btn.set_visible(self.history.provider == "ollama" and _agent is not None)
+
+    def _on_agent_toggled(self, btn):
+        if getattr(self, "_agent_sync", False):
+            return
+        self.config.set("agent.enabled", bool(btn.get_active()))
+        try:
+            self.config.save()
+        except Exception as exc:
+            _warn("config.save failed: %r" % (exc,))
+        self._sync_agent_btn()
+        self.show_banner(
+            "Modo agente ligado — comandos que alteram o sistema vão pedir "
+            "permissão" if btn.get_active() else "Modo agente desligado", 3500)
 
     def _think_ligado(self):
         modo = str(self.config.get("ollama.think", "off") or "off").lower()
@@ -2511,6 +2664,7 @@ class Sidebar(Gtk.ApplicationWindow):
         self._update_send_state()
 
         self._sync_think_btn()
+        self._sync_agent_btn()
 
     def set_edge(self, side):
         """Move the panel to the given screen edge and persist the choice."""
@@ -2939,6 +3093,19 @@ class Sidebar(Gtk.ApplicationWindow):
     def _update_placeholder(self):
         self._placeholder.set_visible(not self._rows)
 
+    def _anexar_widget(self, widget):
+        """Poe um bloco avulso na conversa, sem virar uma MessageRow.
+
+        Usado pelas chamadas de ferramenta: elas pertencem ao fluxo, mas nao
+        sao mensagens -- nao tem autor, nao se copiam nem se apagam.
+        """
+        self._placeholder.set_visible(False)
+        self._chat_box.append(widget)
+        # Entra na mesma lista das mensagens para ser limpo junto: sem isso o
+        # bloco de ferramenta sobrevivia ao /clear e ficava orfao na tela.
+        self._rows.append(widget)
+        GLib.idle_add(self._scroll_to_bottom)
+
     def _append_row(self, role, content, msg_id=None, name=None, persist=True,
                     metricas=None):
         if persist:
@@ -3008,7 +3175,8 @@ class Sidebar(Gtk.ApplicationWindow):
 
     def _copy_last_reply(self):
         for row in reversed(self._rows):
-            if row.role == ROLE_ASSISTANT:
+            # _rows tambem carrega blocos de ferramenta, que nao tem papel
+            if getattr(row, "role", None) == ROLE_ASSISTANT:
                 if copy_to_clipboard(self, row.content):
                     self.show_banner("Copied the last reply.", 2500)
                 return
@@ -3216,6 +3384,35 @@ class Sidebar(Gtk.ApplicationWindow):
             self._add_interface("Provider set to **%s**." % provider.name)
             return True
 
+        if cmd in ("agente", "agent"):
+            ligado = bool(self.config.get("agent.enabled", False))
+            if not args:
+                self._add_interface(
+                    "## Modo agente\n\n"
+                    "Agora: **%s**\n\n"
+                    "Ligado, o modelo pode rodar comandos nesta maquina para "
+                    "responder. Comandos de leitura rodam direto; qualquer "
+                    "coisa que altere o sistema mostra o comando exato e "
+                    "espera voce clicar em **Permitir**.\n\n"
+                    "`/agente on` liga, `/agente off` desliga. Vale para o "
+                    "Ollama com modelos que suportam ferramentas." %
+                    ("ligado" if ligado else "desligado"))
+                return True
+            escolha = args[0].lower()
+            if escolha not in ("on", "off", "ligado", "desligado"):
+                self._add_interface("Use `/agente on` ou `/agente off`.")
+                return True
+            novo = escolha in ("on", "ligado")
+            self.config.set("agent.enabled", novo)
+            try:
+                self.config.save()
+            except Exception as exc:
+                _warn("config.save failed: %r" % (exc,))
+            self._sync_agent_btn()
+            self.show_banner(
+                "Modo agente ligado" if novo else "Modo agente desligado", 3000)
+            return True
+
         if cmd == "think":
             validos = ("auto", "on", "off", "low", "medium", "high")
             atual = str(self.config.get("ollama.think", "off") or "off").lower()
@@ -3360,27 +3557,56 @@ class Sidebar(Gtk.ApplicationWindow):
         # mensagem e o indicador antes de qualquer trabalho de rede
         GLib.idle_add(self._start_stream)
 
+    # Sem isto o modelo responde escrevendo o comando como texto, esperando
+    # que o usuario o rode. Tendo a ferramenta, ele precisa ouvir que rodar e
+    # com ele -- e que negar nao e motivo para insistir.
+    _PROMPT_AGENTE = (
+        "\n\nYou can run commands on this machine with the run_shell tool. "
+        "When the answer depends on the actual state of the system — files, "
+        "packages, services, hardware, logs — call the tool instead of "
+        "printing a command for the user to run. Chain calls when one result "
+        "leads to the next.\n"
+        "Read-only commands run immediately. Anything that changes the system "
+        "is shown to the user, who approves or refuses it, so say what you are "
+        "about to change and why before asking. If a command is refused, do "
+        "not retry it: explain what it would have done, or offer another way."
+    )
+
     def _system_prompt(self):
+        base = ""
         resolver = getattr(self.config, "system_prompt", None)
         if callable(resolver):
             try:
-                value = resolver()
-                if value:
-                    return value
+                base = resolver() or ""
             except Exception as exc:
                 _warn("config.system_prompt() failed: %r" % (exc,))
-        return self.config.get("chat.system_prompt", "") or ""
+        if not base:
+            base = self.config.get("chat.system_prompt", "") or ""
+        if self._agente_ligado():
+            base = base + self._PROMPT_AGENTE
+        return base
 
     def _build_request_messages(self):
         try:
             limit = int(self.config.get("chat.max_history_messages", 40))
         except (TypeError, ValueError):
             limit = 40
-        messages = [
-            {"role": m["role"], "content": m.get("content", "")}
-            for m in self.history.messages
-            if m.get("role") in (ROLE_USER, ROLE_ASSISTANT) and (m.get("content") or "").strip()
-        ]
+        messages = []
+        for m in self.history.messages:
+            papel = m.get("role")
+            if papel not in (ROLE_USER, ROLE_ASSISTANT, "tool"):
+                continue
+            texto = m.get("content") or ""
+            # Um turno de assistente sem texto so vale se pediu ferramenta;
+            # o turno "tool" e a resposta dela, e nunca e vazio.
+            if not texto.strip() and not m.get("tool_calls"):
+                continue
+            turno = {"role": papel, "content": texto}
+            if m.get("tool_calls"):
+                turno["tool_calls"] = m["tool_calls"]
+            if papel == "tool" and m.get("tool_name"):
+                turno["tool_name"] = m["tool_name"]
+            messages.append(turno)
         if limit > 0:
             messages = messages[-limit:]
         return messages
@@ -3436,13 +3662,15 @@ class Sidebar(Gtk.ApplicationWindow):
         """Runs OFF the main loop.  Never touches a widget directly."""
         error = None
         self._done_reason = None
+        self._tool_calls = []
         try:
             # Nem todo registry expoe stream_events; cair para o stream de
             # texto puro e melhor do que quebrar o envio.
             eventos_fn = getattr(self.registry, "stream_events", None)
             if callable(eventos_fn):
                 eventos = eventos_fn(
-                    provider_id, model_id, messages, system, cancel)
+                    provider_id, model_id, messages, system, cancel,
+                    self._ferramentas_ativas())
             else:
                 eventos = _somente_texto(self.registry.stream(
                     provider_id, model_id, messages, system, cancel))
@@ -3452,6 +3680,9 @@ class Sidebar(Gtk.ApplicationWindow):
                 kind = getattr(ev, "kind", "text")
                 if kind == "usage":
                     self._done_reason = (ev.data or {}).get("done_reason")
+                    continue
+                if kind == "tool":
+                    self._tool_calls.append(dict(ev.data or {}))
                     continue
                 if kind not in ("text", "thinking"):
                     continue
@@ -3575,6 +3806,17 @@ class Sidebar(Gtk.ApplicationWindow):
         self._cancel = None
         self._worker = None
         self._active_row = None
+
+        # O modelo pediu ferramenta: o turno nao acabou, so mudou de mao.
+        # Executar (ou pedir permissao) e continuar de onde parou.
+        chamadas = getattr(self, "_tool_calls", None)
+        if chamadas and not error and not cancelled:
+            self._tool_calls = []
+            self._executar_ferramentas(chamadas)
+            return GLib.SOURCE_REMOVE
+
+        self._tool_calls = []
+        self._passo_agente = 0
         self._send_btn.set_icon_name("go-up-symbolic")
         self._send_btn.set_tooltip_text("Send (Enter)")
         self._send_btn.remove_css_class("stop-btn")
@@ -3585,6 +3827,143 @@ class Sidebar(Gtk.ApplicationWindow):
         except Exception as exc:
             _warn("history save failed: %r" % (exc,))
         return GLib.SOURCE_REMOVE
+
+    # ------------------------------------------------------------------
+    # Modo agente
+    # ------------------------------------------------------------------
+    def _agente_ligado(self):
+        if _agent is None:
+            return False
+        if not bool(self.config.get("agent.enabled", False)):
+            return False
+        # So o Ollama esta ligado ao protocolo de ferramentas por enquanto.
+        return self.history.provider == "ollama"
+
+    def _ferramentas_ativas(self):
+        return _agent.FERRAMENTAS if self._agente_ligado() else None
+
+    def _executar_ferramentas(self, chamadas):
+        """Roda o que o modelo pediu e devolve o resultado para ele.
+
+        Um passo de cada vez: se o comando precisa de permissao, a cadeia para
+        aqui ate o clique. As chamadas restantes ficam na fila.
+        """
+        limite = 8
+        try:
+            limite = int(self.config.get("agent.max_steps", 8))
+        except (TypeError, ValueError):
+            pass
+        self._passo_agente = getattr(self, "_passo_agente", 0) + 1
+        if self._passo_agente > max(1, limite):
+            self.show_banner(
+                "O agente parou depois de %d passos — peça de novo se quiser "
+                "que ele continue." % limite, 6000)
+            self._passo_agente = 0
+            self._finalizar_turno()
+            return
+
+        # O pedido do modelo entra no historico antes do resultado, senao ele
+        # perde de vista o que foi que pediu.
+        try:
+            self.history.add_tool_call([
+                {"id": c.get("id") or "", "type": "function",
+                 "function": {"name": c.get("name"),
+                              "arguments": c.get("arguments") or {}}}
+                for c in chamadas])
+        except Exception as exc:
+            _warn("nao consegui registrar a chamada: %r" % (exc,))
+
+        self._fila_ferramentas = list(chamadas)
+        self._proxima_ferramenta()
+
+    def _proxima_ferramenta(self):
+        fila = getattr(self, "_fila_ferramentas", None)
+        if not fila:
+            self._continuar_agente()
+            return
+        chamada = fila.pop(0)
+        nome = chamada.get("name") or ""
+        args = chamada.get("arguments") or {}
+        cmd = str(args.get("cmd") or "").strip()
+
+        if nome != "run_shell" or not cmd:
+            self._registrar_resultado(nome or "?", cmd,
+                                      "(ferramenta desconhecida)", 1)
+            return
+
+        precisa_ok = not _agent.so_leitura(cmd)
+        # Rastro no log: sem isto nao da para distinguir "rodou porque era
+        # leitura" de "rodou porque o usuario permitiu".
+        _warn("agente: %s | %s" % ("PEDE PERMISSAO" if precisa_ok
+                                   else "leitura, roda direto", cmd))
+        bloco = ToolBlock(cmd, precisa_ok,
+                          lambda ok, c=cmd: self._decidido(ok, c))
+        self._bloco_atual = bloco
+        self._anexar_widget(bloco)
+
+        if not precisa_ok:
+            GLib.idle_add(self._rodar_comando, cmd, bloco)
+
+    def _decidido(self, ok, cmd):
+        bloco = getattr(self, "_bloco_atual", None)
+        _warn("agente: usuario %s | %s" % ("PERMITIU" if ok else "NEGOU", cmd))
+        if not ok:
+            if bloco is not None:
+                bloco.marcar("negado")
+            self._registrar_resultado(
+                "run_shell", cmd,
+                "O usuario negou este comando. Nao tente rodar de novo; "
+                "explique o que faria ou proponha outro caminho.", 1)
+            return
+        if bloco is not None:
+            bloco.marcar("rodando")
+        GLib.idle_add(self._rodar_comando, cmd, bloco)
+
+    def _rodar_comando(self, cmd, bloco):
+        tempo = 45
+        try:
+            tempo = int(self.config.get("agent.timeout", 45))
+        except (TypeError, ValueError):
+            pass
+
+        def trabalho():
+            saida, codigo = _agent.executar(cmd, timeout=tempo)
+            GLib.idle_add(self._comando_terminou, cmd, bloco, saida, codigo)
+
+        threading.Thread(target=trabalho, name="hyde-ai-tool",
+                         daemon=True).start()
+        return GLib.SOURCE_REMOVE
+
+    def _comando_terminou(self, cmd, bloco, saida, codigo):
+        if bloco is not None:
+            bloco.marcar("pronto", codigo)
+            bloco.mostrar_saida(saida)
+        self._registrar_resultado("run_shell", cmd, saida, codigo)
+        return GLib.SOURCE_REMOVE
+
+    def _registrar_resultado(self, nome, cmd, saida, codigo):
+        try:
+            self.history.add_tool_result(
+                nome, _agent.resultado_para_modelo(cmd, saida, codigo))
+        except Exception as exc:
+            _warn("nao consegui registrar o resultado: %r" % (exc,))
+        self._proxima_ferramenta()
+
+    def _continuar_agente(self):
+        """Volta ao modelo com os resultados na mao."""
+        self.history.save()
+        GLib.idle_add(self._start_stream)
+
+    def _finalizar_turno(self):
+        self._send_btn.set_icon_name("go-up-symbolic")
+        self._send_btn.set_tooltip_text("Send (Enter)")
+        self._send_btn.remove_css_class("stop-btn")
+        self._status_label.set_text(self.history.model or "")
+        self._update_send_state()
+        try:
+            self.history.save()
+        except Exception as exc:
+            _warn("history save failed: %r" % (exc,))
 
     def _stop_stream(self):
         if self._cancel is not None:

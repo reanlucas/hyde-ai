@@ -150,6 +150,17 @@ DEFAULTS: Dict[str, Any] = {
         "system_prompt": DEFAULT_SYSTEM_PROMPT,
         "max_history_messages": 40,
     },
+    # Modo agente: o modelo pode rodar comandos nesta maquina. Desligado por
+    # padrao -- ligar e uma decisao consciente, nao um default.
+    #
+    # Comandos de leitura rodam direto; qualquer coisa que altere o sistema
+    # so roda depois de o usuario clicar em Permitir. A classificacao vive em
+    # agent.py e erra para o lado de perguntar.
+    "agent": {
+        "enabled": False,
+        "max_steps": 8,          # teto de idas e voltas por pergunta
+        "timeout": 45,           # segundos por comando
+    },
     # Layer-shell surface geometry.
     "sidebar": {
         "namespace": "hyde-ai",
