@@ -21,9 +21,22 @@ Claude · Gemini · ChatGPT · Ollama local — todos com streaming.
 ---
 
 <div align="center">
-  <img src="docs/conversa.gif" width="420" alt="A maths question answered live: the reasoning header pulses, then five display formulas typeset one after another as the answer streams in">
-  <p><em>Uma pergunta de cálculo respondida pelo Qwen3.5 9B rodando local.
-  Acelerado 2&times;.</em></p>
+  <img src="docs/sidebar.gif" width="860" alt="The sidebar slides in from the right edge over the desktop, slides out, reopens docked to the left edge, then returns to the right">
+  <p><em>Uma barra lateral de verdade: layer-shell, desliza sobre o desktop sem
+  redimensionar nada. <code>/side left</code> troca a borda.</em></p>
+</div>
+
+<div align="center">
+  <img src="docs/ssh.gif" width="400" alt="Asking how to configure a GitHub SSH connection on Arch Linux; the answer streams in with numbered steps and syntax-highlighted shell blocks">
+  &nbsp;&nbsp;
+  <img src="docs/painel.png" width="400" alt="The finished answer: numbered steps with ssh-keygen, chmod and ssh -T commands in highlighted code blocks, with the reasoning collapsed at the bottom">
+  <p><em>Uma pergunta prática, respondida pelo Qwen3.5 9B rodando local.
+  Blocos de código com realce de sintaxe e numeração. Acelerado 3,5&times;.</em></p>
+</div>
+
+<div align="center">
+  <img src="docs/conversa.gif" width="400" alt="A maths question answered live: five display formulas typeset one after another as the answer streams in">
+  <p><em>E uma de cálculo, com as fórmulas tipografadas conforme chegam.</em></p>
 </div>
 
 ---
