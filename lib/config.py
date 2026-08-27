@@ -4,8 +4,10 @@ hyde-ai :: configuration
 
 Load/save ``~/.config/hyde-ai/config.json``.
 
-The file holds API keys, so it is written atomically and kept at mode 0600.
-Only the Python standard library is used.
+The file holds panel geometry and backend paths — API keys live with Hermes,
+in ``~/.hermes/.env``.  Writes stay atomic and at mode 0600 (the file once
+carried keys, and old copies on disk still may).  Only the standard library
+is used.
 
 Design notes
 ------------
@@ -78,90 +80,34 @@ DEFAULT_SYSTEM_PROMPT = (
 
 DEFAULTS: Dict[str, Any] = {
     "version": 1,
-    # Which provider/model the UI should open with.
-    "provider": "anthropic",
-    # Last-used model per provider, so switching back and forth is sticky.
-    "models": {
-        "anthropic": "claude-opus-5",
-        "gemini": "gemini-3.7-flash",
-        "openai": "gpt-5.6-sol",
-        "ollama": "",
+    # Backend: o gateway do Hermes (tui_gateway) num processo separado,
+    # com venv proprio -- o Python do sistema (3.14) nao roda o Hermes
+    # (exige >=3.11,<3.14). Preenchido pelo install.sh / --setup.
+    "hermes": {
+        "python": "",              # python do venv do hermes-agent
+        "path": "",                # checkout do hermes-agent (cwd do gateway)
+        "transport": "stdio",      # "ws" reservado para o futuro
+        "model": "",               # escolha sticky passada ao session.create
+        "provider": "",
+        "reasoning_effort": "",    # ""|low|medium|high (proxima sessao)
+        "show_thinking": True,
+        "spawn_timeout": 20.0,
+        "request_timeout": 30.0,
+        "restart_backoff": [0.5, 2.0, 5.0],
+        "session_source": "hyde-ai",
     },
-    # API keys. Empty string means "not set here"; the provider then falls
-    # back to the environment variable, and is otherwise unavailable.
-    "api_keys": {
-        "anthropic": "",
-        "gemini": "",
-        "openai": "",
-        "ollama": "",
-    },
-    # Panel geometry. Every value here is written back by /side and /width
-    # (and by `hyde-ai --side/--width`), so changes survive a restart.
-    "sidebar": {
-        # "right" or "left"
-        "edge": "right",
-        # Fraction of the monitor width, clamped between width_min/width_max.
-        "width_fraction": 0.28,
-        "width_min": 420,
-        "width_max": 900,
-        "namespace": "hyde-ai",
-    },
+    # Which provider/model the UI opens with (slugs do inventario do Hermes;
+    # vazio deixa o Hermes escolher). As chaves de API moram no ~/.hermes/.env.
+    "provider": "",
+    # System prompt: o de verdade e do Hermes (~/.hermes/config.yaml); estes
+    # ficam so como artefato da interface e de configs antigas.
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
-    # Modelos de raciocinio gastam milhares de tokens no rascunho antes
-    # da primeira palavra da resposta; com 4096 eles batem o teto e
-    # terminam sem responder nada.
-    "max_tokens": 8192,
-    # None => use each provider's own default. A float 0-2 is sent only to
-    # providers/models that still accept sampling parameters.
-    "temperature": None,
-    "request": {
-        "connect_timeout": 15.0,
-        "read_timeout": 180.0,
-    },
-    "anthropic": {
-        "base_url": "https://api.anthropic.com",
-        # "default" sends nothing (provider default), "summarized" asks for
-        # visible reasoning summaries, "off" disables extended thinking.
-        "thinking": "default",
-    },
-    "gemini": {
-        "base_url": "https://generativelanguage.googleapis.com",
-    },
-    "openai": {
-        "base_url": "https://api.openai.com/v1",
-        "reasoning_effort": "",
-    },
-    "ollama": {
-        "base_url": "http://localhost:11434",
-        "num_ctx": 0,
-        "keep_alive": "5m",
-        # Rascunho dos modelos de raciocinio. Desligado por padrao: ele
-        # multiplica o tempo de resposta por cinco ou mais, e quase nunca vale
-        # numa barra lateral. Liga no botao ao lado do envio, por pergunta.
-        "think": "off",
-    },
-    # Escape hatch: any endpoint speaking the OpenAI or Ollama wire format.
-    # See providers.py :: build_custom_provider for the accepted shape.
-    "custom_providers": [],
-    # Chat behaviour. "chat.system_prompt" is the canonical prompt the UI
-    # reads; the top-level "system_prompt" above is kept as an alias for
-    # older configs and is resolved by Config.system_prompt().
     "chat": {
         "system_prompt": DEFAULT_SYSTEM_PROMPT,
         "max_history_messages": 40,
     },
-    # Modo agente: o modelo pode rodar comandos nesta maquina. Desligado por
-    # padrao -- ligar e uma decisao consciente, nao um default.
-    #
-    # Comandos de leitura rodam direto; qualquer coisa que altere o sistema
-    # so roda depois de o usuario clicar em Permitir. A classificacao vive em
-    # agent.py e erra para o lado de perguntar.
-    "agent": {
-        "enabled": False,
-        "max_steps": 8,          # teto de idas e voltas por pergunta
-        "timeout": 45,           # segundos por comando
-    },
-    # Layer-shell surface geometry.
+    # Layer-shell surface geometry. Every value here is written back by
+    # /side and /width (and by `hyde-ai --side/--width`).
     "sidebar": {
         "namespace": "hyde-ai",
         "edge": "right",

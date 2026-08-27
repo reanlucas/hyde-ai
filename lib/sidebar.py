@@ -27,7 +27,7 @@ registry -- ``list_providers()``  -> list of provider info objects/dicts with
                                      "content": str}``.  Raises on failure; the
                                      exception text is shown to the user.
 history  -- ``messages`` (list of dicts), ``add(role, content, **meta)``,
-            ``replace_last_content(text)``, ``new_conversation(p, m)``,
+            ``replace_content(msg_id, text)``, ``new_conversation(p, m)``,
             ``delete(msg_id)``, ``truncate_from(msg_id)``, ``save()``,
             ``provider`` / ``model`` properties.
 theme    -- ``ThemeManager`` instance (defined below).
@@ -50,6 +50,7 @@ try:
 except OSError:  # pragma: no cover - only on a broken install
     LAYER_SHELL_OK = False
 
+import json
 import os
 import re
 import sys
@@ -753,12 +754,6 @@ try:
 except Exception:  # pragma: no cover
     _mathrender = None
 
-# Ferramentas do modo agente. Ausente, o painel segue como chat puro.
-try:
-    import agent as _agent
-except Exception:  # pragma: no cover
-    _agent = None
-
 try:
     import speedstats as _vel
 except Exception:  # pragma: no cover
@@ -1443,7 +1438,7 @@ class ToolBlock(Gtk.Box):
     decisao e do usuario, e ela precisa caber num olhar.
     """
 
-    def __init__(self, cmd, precisa_ok, on_decisao):
+    def __init__(self, cmd, precisa_ok, on_decisao, titulo="shell"):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.add_css_class("tool")
         self._cmd = cmd or ""
@@ -1453,7 +1448,7 @@ class ToolBlock(Gtk.Box):
         icone = Gtk.Image.new_from_icon_name("utilities-terminal-symbolic")
         icone.add_css_class("tool-icon")
         cab.append(icone)
-        self._titulo = Gtk.Label(xalign=0.0, label="shell")
+        self._titulo = Gtk.Label(xalign=0.0, label=titulo or "shell")
         self._titulo.add_css_class("tool-title")
         cab.append(self._titulo)
         cab.append(_spacer())
@@ -1530,6 +1525,192 @@ class ToolBlock(Gtk.Box):
         self._exp.set_visible(bool(texto))
         # a saida importa quando algo deu errado; senao fica fora do caminho
         self._exp.set_expanded(False)
+
+
+class ApprovalBlock(Gtk.Box):
+    """Pedido de aprovacao vindo do Hermes: o comando a vista, decisao sua.
+
+    As escolhas vem do gateway (once/session/always/deny); a resposta volta
+    por approval.respond e o agente fica parado ate o clique.  Usa as mesmas
+    classes CSS tool-* do ToolBlock para o wallbash tematizar junto.
+    """
+
+    _ROTULOS = {
+        "deny": "Negar",
+        "session": "Sempre nesta sessao",
+        "always": "Sempre",
+        "once": "Permitir",
+    }
+
+    def __init__(self, data, on_escolha):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.add_css_class("tool")
+        self.add_css_class("tool-espera")
+        self._on_escolha = on_escolha
+        self._request_id = str((data or {}).get("request_id") or "")
+
+        cab = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        icone = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
+        icone.add_css_class("tool-icon")
+        cab.append(icone)
+        titulo = Gtk.Label(xalign=0.0, label="aprovacao")
+        titulo.add_css_class("tool-title")
+        cab.append(titulo)
+        cab.append(_spacer())
+        self._estado = Gtk.Label(xalign=1.0, label="esperando voce")
+        self._estado.add_css_class("tool-state")
+        cab.append(self._estado)
+        self.append(cab)
+
+        descricao = str((data or {}).get("description") or "").strip()
+        if descricao:
+            desc = Gtk.Label(xalign=0.0, label=descricao)
+            desc.add_css_class("tool-out")
+            desc.set_wrap(True)
+            desc.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            self.append(desc)
+
+        comando = str((data or {}).get("command") or "")
+        if comando:
+            linha = Gtk.Label(xalign=0.0, label=comando)
+            linha.add_css_class("tool-cmd")
+            linha.set_wrap(True)
+            linha.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            linha.set_selectable(True)
+            self.append(linha)
+
+        self._botoes = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self._botoes.set_halign(Gtk.Align.END)
+        escolhas = list((data or {}).get("choices") or ["once", "deny"])
+        # Negar primeiro, Permitir por ultimo -- mesma ordem do ToolBlock.
+        ordem = [c for c in ("deny", "always", "session", "once") if c in escolhas]
+        for escolha in ordem:
+            botao = Gtk.Button(label=self._ROTULOS.get(escolha, escolha))
+            if escolha == "deny":
+                botao.add_css_class("tool-negar")
+            elif escolha == "once":
+                botao.add_css_class("suggested-action")
+                botao.add_css_class("tool-permitir")
+            botao.connect("clicked", lambda _b, e=escolha: self._decidir(e))
+            self._botoes.append(botao)
+        self.append(self._botoes)
+
+    def _decidir(self, escolha):
+        self._botoes.set_visible(False)
+        self.remove_css_class("tool-espera")
+        if escolha == "deny":
+            self._estado.set_text("negado")
+            self.add_css_class("tool-erro")
+        else:
+            self._estado.set_text("permitido")
+            self.add_css_class("tool-ok")
+        if callable(self._on_escolha):
+            self._on_escolha(escolha, self._request_id)
+
+    def expirar(self):
+        if self._botoes.get_visible():
+            self._botoes.set_visible(False)
+            self.remove_css_class("tool-espera")
+            self.add_css_class("tool-erro")
+            self._estado.set_text("expirou")
+
+
+class ClarifyBlock(Gtk.Box):
+    """Pergunta do Hermes no meio do turno (clarify.request).
+
+    Botoes quando o gateway manda opcoes; senao, um campo de texto.  A
+    resposta volta por clarify.respond e o turno continua.
+    """
+
+    def __init__(self, data, on_resposta):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.add_css_class("tool")
+        self.add_css_class("tool-espera")
+        self._on_resposta = on_resposta
+        self._request_id = str((data or {}).get("request_id") or "")
+        # AskUserQuestion em lote: varias perguntas sob o mesmo request_id,
+        # cada uma respondida pelo seu question_id.
+        self._question_id = str((data or {}).get("question_id") or "")
+
+        cab = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        icone = Gtk.Image.new_from_icon_name("dialog-question-symbolic")
+        icone.add_css_class("tool-icon")
+        cab.append(icone)
+        titulo = Gtk.Label(xalign=0.0, label="pergunta do agente")
+        titulo.add_css_class("tool-title")
+        cab.append(titulo)
+        cab.append(_spacer())
+        self._estado = Gtk.Label(xalign=1.0, label="esperando voce")
+        self._estado.add_css_class("tool-state")
+        cab.append(self._estado)
+        self.append(cab)
+
+        pergunta = str((data or {}).get("question") or "").strip()
+        if pergunta:
+            lbl = Gtk.Label(xalign=0.0, label=pergunta)
+            lbl.add_css_class("tool-cmd")
+            lbl.set_wrap(True)
+            lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            lbl.set_selectable(True)
+            self.append(lbl)
+
+        escolhas = [str(c) for c in ((data or {}).get("choices") or []) if c]
+        multi = bool((data or {}).get("multi_select"))
+        caixa = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        if escolhas:
+            # Todas as opcoes viram botao (o FlowBox quebra a linha sozinho);
+            # com multi_select o clique acumula no campo em vez de enviar.
+            grade = Gtk.FlowBox()
+            grade.set_selection_mode(Gtk.SelectionMode.NONE)
+            grade.set_max_children_per_line(4)
+            for escolha in escolhas:
+                botao = Gtk.Button(label=escolha)
+                if multi:
+                    botao.connect("clicked",
+                                  lambda _b, e=escolha: self._acumular(e))
+                else:
+                    botao.connect("clicked",
+                                  lambda _b, e=escolha: self._responder(e))
+                grade.append(botao)
+            caixa.append(grade)
+        if multi or not escolhas:
+            fila = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            self._entrada = Gtk.Entry()
+            self._entrada.set_hexpand(True)
+            self._entrada.connect(
+                "activate", lambda _e: self._responder(self._entrada.get_text()))
+            fila.append(self._entrada)
+            botao = Gtk.Button(label="Responder")
+            botao.add_css_class("suggested-action")
+            botao.connect(
+                "clicked", lambda _b: self._responder(self._entrada.get_text()))
+            fila.append(botao)
+            caixa.append(fila)
+        self._controles = caixa
+        self.append(caixa)
+
+    def _acumular(self, escolha):
+        atual = self._entrada.get_text().strip()
+        self._entrada.set_text((atual + ", " + escolha) if atual else escolha)
+
+    def _responder(self, texto):
+        texto = (texto or "").strip()
+        if not texto:
+            return
+        self._controles.set_visible(False)
+        self.remove_css_class("tool-espera")
+        self.add_css_class("tool-ok")
+        self._estado.set_text("respondido")
+        if callable(self._on_resposta):
+            self._on_resposta(texto, self._request_id, self._question_id)
+
+    def expirar(self):
+        """O gateway desistiu da pergunta (timeout ou fim do turno)."""
+        if self._estado.get_text() == "respondido":
+            return
+        self._controles.set_visible(False)
+        self.remove_css_class("tool-espera")
+        self._estado.set_text("expirada")
 
 
 class MessageRow(Gtk.Box):
@@ -1868,19 +2049,26 @@ _INPUT_INSET = 8
 
 HELP_TEXT = """## hyde-ai
 
+O backend agora e o **Hermes**: todo turno e agentico (arquivos, comandos,
+web, memoria), e o que altera o sistema pede a sua permissao inline.
+
 **Slash commands**
 
 - `/help` — this message
 - `/clear` — start a fresh conversation
 - `/provider` — list providers, `/provider <id>` to switch
 - `/model` — list models, `/model <id>` to switch
-- `/key <provider> <value>` — store an API key
+- `/key <provider> <value>` — store an API key (no Hermes)
 - `/keys` — show which providers have a key
-- `/historico` — lista as conversas salvas
+- `/historico` — conversas salvas no Hermes · `/historico abrir <n|id>`
+- `/think on|off|low|medium|high` — rascunho visivel / esforco
+- `/velocidade` — tokens/s medio por modelo
 - `/refresh` — rescan providers and models now
-- `/restart` — restart hyde-ai (rarely needed; models auto-detect)
+- `/restart` — restart hyde-ai
 - `/side left|right` — which edge the panel opens on
 - `/width 35` — panel width, as a percent or `700px`
+
+Qualquer outro `/comando` vai direto para o Hermes (`/memoria`, `/skills`...).
 
 **Keys**
 
@@ -1895,17 +2083,17 @@ HELP_TEXT = """## hyde-ai
 COMANDOS = [
     ("/help",      "",                    "mostra a ajuda"),
     ("/clear",     "",                    "comeca uma conversa nova"),
-    ("/historico", "",                    "lista as conversas salvas"),
+    ("/historico", "[abrir <n|id>]",      "conversas salvas no Hermes"),
     ("/provider",  "[id]",                "lista ou troca de provedor"),
     ("/model",     "[id]",                "lista ou troca de modelo"),
-    ("/key",       "<provedor> <valor>",  "guarda uma chave de API"),
+    ("/key",       "<provedor> <valor>",  "guarda uma chave de API no Hermes"),
     ("/keys",      "",                    "mostra quais provedores tem chave"),
     ("/refresh",   "",                    "reprocura provedores e modelos"),
     ("/side",      "left|right",          "borda em que o painel abre"),
     ("/width",     "35 | 700px",           "largura do painel"),
     ("/velocidade","",                    "tokens/s medio por modelo"),
-    ("/think",     "auto|on|off|low|medium|high", "rascunho dos modelos de raciocinio"),
-    ("/agente",    "on|off",              "deixa o modelo rodar comandos aqui"),
+    ("/think",     "on|off|low|medium|high", "rascunho visivel / esforco"),
+    ("/agente",    "",                    "como funciona o agente (Hermes)"),
     ("/restart",   "",                    "reinicia o hyde-ai"),
 ]
 
@@ -1920,6 +2108,18 @@ class Sidebar(Gtk.ApplicationWindow):
         self.history = history
         self.theme = theme
 
+        # Eventos fora de turno do Hermes (titulo, notificacao, queda do
+        # gateway) chegam numa thread de fundo; daqui so marshala.
+        registrador = getattr(registry, "set_ui_handler", None)
+        if callable(registrador):
+            registrador(lambda params: GLib.idle_add(
+                self._on_hermes_background, dict(params or {})))
+        # A conversa restaurada do cache continua a mesma sessao do Hermes.
+        adotar = getattr(registry, "adopt_session", None)
+        vinculo = getattr(history, "hermes_session", None)
+        if callable(adotar) and callable(vinculo) and vinculo():
+            adotar(vinculo())
+
         self.set_decorated(False)
         self.set_title("hyde-ai")
         self.add_css_class("hyde-ai")
@@ -1933,6 +2133,10 @@ class Sidebar(Gtk.ApplicationWindow):
 
         self._stream_seq = 0
         self._cancel = None
+        self._hermes_tools = {}
+        self._aprovacoes = {}
+        self._clarifies = {}            # request_id -> [ClarifyBlock]
+        self._stream_pendente = False   # _start_stream agendado no idle
         self._paleta = None
         self._paleta_lista = None
         self._rescanning = False
@@ -1942,7 +2146,6 @@ class Sidebar(Gtk.ApplicationWindow):
         self._worker = None
         self._active_row = None
         self._pending_deltas = []
-        self._done_reason = None
         self._pending_lock = threading.Lock()
         self._flush_id = 0
         self._follow = True
@@ -2227,21 +2430,10 @@ class Sidebar(Gtk.ApplicationWindow):
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         controls.add_css_class("input-controls")
 
-        # Ligar/desligar o rascunho e uma decisao por pergunta, nao de
-        # configuracao: "quanto vale esperar" muda a cada uma. Por isso mora
-        # aqui, ao lado do envio, e nao enterrado num arquivo.
-        # Modo agente ao lado do raciocinio: as duas decisoes que mudam o que
-        # acontece com a proxima pergunta ficam juntas, na altura do envio.
-        self._agent_sync = False
-        self._agent_btn = Gtk.ToggleButton()
-        self._agent_btn.set_child(
-            Gtk.Image.new_from_icon_name("utilities-terminal-symbolic"))
-        self._agent_btn.add_css_class("flat")
-        self._agent_btn.add_css_class("agent-btn")
-        self._agent_btn.connect("toggled", self._on_agent_toggled)
-        controls.append(self._agent_btn)
-        self._sync_agent_btn()
-
+        # Mostrar (ou nao) o raciocinio e uma decisao por pergunta, nao de
+        # configuracao. Por isso mora aqui, ao lado do envio, e nao enterrado
+        # num arquivo. O agente nao tem mais botao: agora ele E o backend
+        # (Hermes), e o que altera o sistema pede permissao inline.
         self._think_sync = False
         self._think_btn = Gtk.ToggleButton()
         self._think_btn.set_child(Gtk.Image.new_from_icon_name("weather-clear-symbolic"))
@@ -2435,44 +2627,8 @@ class Sidebar(Gtk.ApplicationWindow):
         end = self._input_buffer.get_end_iter()
         self._input_buffer.place_cursor(end)
 
-    def _sync_agent_btn(self):
-        btn = getattr(self, "_agent_btn", None)
-        if btn is None:
-            return
-        ligado = bool(self.config.get("agent.enabled", False))
-        self._agent_sync = True
-        try:
-            btn.set_active(ligado)
-        finally:
-            self._agent_sync = False
-        if ligado:
-            btn.set_tooltip_text(
-                "Modo agente ligado — o modelo pode rodar comandos aqui; "
-                "o que altera o sistema pede permissão (clique para desligar)")
-            btn.remove_css_class("agent-off")
-        else:
-            btn.set_tooltip_text(
-                "Modo agente desligado — só conversa (clique para ligar)")
-            btn.add_css_class("agent-off")
-        # so o Ollama fala o protocolo de ferramentas por enquanto
-        btn.set_visible(self.history.provider == "ollama" and _agent is not None)
-
-    def _on_agent_toggled(self, btn):
-        if getattr(self, "_agent_sync", False):
-            return
-        self.config.set("agent.enabled", bool(btn.get_active()))
-        try:
-            self.config.save()
-        except Exception as exc:
-            _warn("config.save failed: %r" % (exc,))
-        self._sync_agent_btn()
-        self.show_banner(
-            "Modo agente ligado — comandos que alteram o sistema vão pedir "
-            "permissão" if btn.get_active() else "Modo agente desligado", 3500)
-
     def _think_ligado(self):
-        modo = str(self.config.get("ollama.think", "off") or "off").lower()
-        return modo not in ("off", "false", "no", "0")
+        return bool(self.config.get("hermes.show_thinking", True))
 
     def _sync_think_btn(self):
         """Reflete a config no botao sem disparar o handler de volta."""
@@ -2487,31 +2643,29 @@ class Sidebar(Gtk.ApplicationWindow):
             btn.set_active(ligado)
         finally:
             self._think_sync = False
-        modo = str(self.config.get("ollama.think", "off") or "off").lower()
         if ligado:
             btn.set_tooltip_text(
-                "Raciocinio: %s - o modelo rascunha antes de responder "
-                "(clique para desligar)" % modo)
+                "Raciocinio visivel — o rascunho do modelo aparece na "
+                "conversa (clique para esconder)")
             btn.remove_css_class("think-off")
         else:
             btn.set_tooltip_text(
-                "Raciocinio desligado - respostas mais rapidas "
-                "(clique para religar)")
+                "Raciocinio escondido — so a resposta aparece "
+                "(clique para mostrar)")
             btn.add_css_class("think-off")
-        # So o Ollama expoe esse controle no protocolo.
-        btn.set_visible(self.history.provider == "ollama")
+        btn.set_visible(True)
 
     def _on_think_toggled(self, btn):
         if getattr(self, "_think_sync", False):
             return
-        self.config.set("ollama.think", "on" if btn.get_active() else "off")
+        self.config.set("hermes.show_thinking", bool(btn.get_active()))
         try:
             self.config.save()
         except Exception as exc:
             _warn("config.save failed: %r" % (exc,))
         self._sync_think_btn()
         self.show_banner(
-            "Raciocinio ligado" if btn.get_active() else "Raciocinio desligado",
+            "Raciocinio visivel" if btn.get_active() else "Raciocinio escondido",
             2500)
 
     def _on_input_changed(self, _buffer):
@@ -2594,11 +2748,17 @@ class Sidebar(Gtk.ApplicationWindow):
             self._update_send_state()
             return
 
+        # Antes do model.options chegar, a lista e a linha sintetica
+        # "Hermes" — serve para a tela, mas nao pode ser persistida como
+        # escolha do usuario (apagaria o provider/modelo reais salvos).
+        inventario_ok = bool(getattr(self.registry, "inventory_loaded", True))
+
         known = {p.id for p in providers}
         if active_pid not in known:
             available = [p for p in providers if p.available]
             active_pid = (available[0].id if available else providers[0].id)
-            self.history.set_model(active_pid, None)
+            if inventario_ok:
+                self.history.set_model(active_pid, None)
         self._provider_sel.set_items(items, active_pid)
 
         models = []
@@ -2642,7 +2802,8 @@ class Sidebar(Gtk.ApplicationWindow):
                     active_model = None
             if active_model is None:
                 active_model = models[0].id if models else None
-            self.history.set_model(active_pid, active_model)
+            if inventario_ok:
+                self.history.set_model(active_pid, active_model)
         self._model_sel.set_items(model_items, active_model)
         if _vel is not None and active_model:
             try:
@@ -2664,7 +2825,6 @@ class Sidebar(Gtk.ApplicationWindow):
         self._update_send_state()
 
         self._sync_think_btn()
-        self._sync_agent_btn()
 
     def set_edge(self, side):
         """Move the panel to the given screen edge and persist the choice."""
@@ -2775,7 +2935,8 @@ class Sidebar(Gtk.ApplicationWindow):
             self._fechar_paleta()
             return
 
-        achados = [c for c in COMANDOS if c[0][1:].startswith(termo.lower())]
+        catalogo = COMANDOS + getattr(self, "_comandos_hermes", [])
+        achados = [c for c in catalogo if c[0][1:].startswith(termo.lower())]
         if not achados:
             self._fechar_paleta()
             return
@@ -2982,6 +3143,11 @@ class Sidebar(Gtk.ApplicationWindow):
             if self.history.abrir(conv_id):
                 self.history.save()
                 self.reload_conversation()
+                # Continua a mesma sessao do Hermes desta conversa (lazy).
+                adotar = getattr(self.registry, "adopt_session", None)
+                vinculo = getattr(self.history, "hermes_session", None)
+                if callable(adotar):
+                    adotar(vinculo() if callable(vinculo) else "")
                 self.show_banner("Conversa restaurada.", timeout_ms=2500)
         except Exception as exc:
             _warn("nao consegui restaurar a conversa: %r" % (exc,))
@@ -3018,6 +3184,7 @@ class Sidebar(Gtk.ApplicationWindow):
             self._sync_selectors()
         except Exception as exc:
             _warn("sync after rescan failed: %r" % (exc,))
+        self._carregar_comandos_hermes()
         after = tuple(self._known_model_ids())
         if announce:
             added = [m for m in after if m not in before]
@@ -3063,11 +3230,31 @@ class Sidebar(Gtk.ApplicationWindow):
         self.history.set_model(pid, None)
         self.history.save()
         self._sync_selectors()
+        self._aplicar_troca_modelo()
 
     def _on_model_selected(self, model_id):
         self.history.set_model(self.history.provider, model_id)
         self.history.save()
         self._sync_selectors()
+        self._aplicar_troca_modelo()
+
+    def _aplicar_troca_modelo(self):
+        """Leva a escolha do picker para a sessao do Hermes (fora do main
+        loop -- config.set e uma RPC).  No meio de um turno o gateway defere
+        a troca para o proximo, o que ja e o comportamento certo."""
+        trocar = getattr(self.registry, "set_model", None)
+        if not callable(trocar):
+            return
+        modelo = self.history.model
+        provedor = self.history.provider
+        if not modelo:
+            return
+
+        def feito(aviso):
+            if aviso:
+                self.show_banner(str(aviso), 8000)
+
+        self._hermes_async(lambda: trocar(modelo, provedor), on_ok=feito)
 
     def _update_send_state(self):
         if self._cancel is not None:
@@ -3121,7 +3308,9 @@ class Sidebar(Gtk.ApplicationWindow):
             name=display_name,
             msg_id=msg_id,
             on_delete=self._on_delete_row,
-            on_regenerate=self._on_regenerate_row if role == ROLE_ASSISTANT else None,
+            # Regenerar sumiu: o transcript de verdade e do Hermes, e reenviar
+            # a ultima pergunta numa sessao que ja respondeu sairia errado.
+            on_regenerate=None,
             show_line_numbers=self._show_line_numbers,
         )
         if metricas:
@@ -3139,7 +3328,7 @@ class Sidebar(Gtk.ApplicationWindow):
 
     def _on_delete_row(self, row):
         if self._cancel is not None and row is self._active_row:
-            self._stop_stream()
+            self._abandon_stream()
         try:
             self.history.delete(row.msg_id)
         except Exception as exc:
@@ -3149,25 +3338,6 @@ class Sidebar(Gtk.ApplicationWindow):
         self._chat_box.remove(row)
         self.history.save()
         self._update_placeholder()
-
-    def _on_regenerate_row(self, row):
-        if self._cancel is not None:
-            self.show_banner("Still streaming — stop it first.")
-            return
-        index = self._rows.index(row) if row in self._rows else -1
-        if index < 0:
-            return
-        try:
-            self.history.truncate_from(row.msg_id)
-        except Exception as exc:
-            _warn("history.truncate_from failed: %r" % (exc,))
-            return
-        for stale in self._rows[index:]:
-            self._chat_box.remove(stale)
-        del self._rows[index:]
-        self._update_placeholder()
-        self.history.save()
-        self._start_stream()
 
     def _add_interface(self, text):
         self._append_row(ROLE_INTERFACE, text)
@@ -3189,7 +3359,7 @@ class Sidebar(Gtk.ApplicationWindow):
         partir do que esta gravado, sem regravar nada (persist=False).
         """
         if self._cancel is not None:
-            self._stop_stream()
+            self._abandon_stream()
         for row in self._rows:
             self._chat_box.remove(row)
         self._rows = []
@@ -3214,7 +3384,7 @@ class Sidebar(Gtk.ApplicationWindow):
 
     def new_conversation(self):
         if self._cancel is not None:
-            self._stop_stream()
+            self._abandon_stream()
         for row in self._rows:
             self._chat_box.remove(row)
         self._rows = []
@@ -3223,6 +3393,10 @@ class Sidebar(Gtk.ApplicationWindow):
             self.history.save()
         except Exception as exc:
             _warn("history.new_conversation failed: %r" % (exc,))
+        # Sessao nova no Hermes tambem -- sem RPC: a proxima mensagem cria.
+        reset = getattr(self.registry, "reset_session", None)
+        if callable(reset):
+            reset()
         self._update_placeholder()
         self._follow = True
         self._to_bottom.set_visible(False)
@@ -3273,7 +3447,7 @@ class Sidebar(Gtk.ApplicationWindow):
     # ------------------------------------------------------------------
     # Slash commands
     # ------------------------------------------------------------------
-    def _handle_command(self, text):
+    def _handle_command(self, text, profundidade=0):
         parts = text[1:].split()
         if not parts:
             return True
@@ -3289,25 +3463,23 @@ class Sidebar(Gtk.ApplicationWindow):
             return True
 
         if cmd in ("historico", "history", "conversas"):
-            itens = self.history.conversas()
-            if not itens:
-                self._add_interface("Nenhuma conversa salva ainda.")
+            listar = getattr(self.registry, "list_sessions", None)
+            if args and args[0].lower() in ("abrir", "open"):
+                alvo = " ".join(args[1:]).strip()
+                if not alvo:
+                    self._add_interface("Use `/historico abrir <n|id>`.")
+                else:
+                    self._abrir_sessao_hermes(alvo)
                 return True
-            import datetime
-            linhas = ["## Conversas salvas", ""]
-            for it in itens:
-                q = ""
-                if it["quando"]:
-                    try:
-                        q = datetime.datetime.fromtimestamp(
-                            it["quando"]).strftime("%d/%m %H:%M")
-                    except Exception:
-                        q = ""
-                linhas.append("- **%s** — %s · %s · %d msgs%s"
-                              % (it["titulo"], it["provider"] or "?", q,
-                                 it["n"], "  (em uso)" if it["atual"] else ""))
-            linhas += ["", "Use o botao de conversas no cabecalho para abrir uma."]
-            self._add_interface("\n".join(linhas))
+            if not callable(listar):
+                self._add_interface("Historico do Hermes indisponivel.")
+                return True
+
+            def feito(sessoes):
+                self._mostrar_sessoes_hermes(sessoes)
+
+            self.show_banner("Buscando conversas no Hermes...", 2000)
+            self._hermes_async(lambda: listar(30), on_ok=feito)
             return True
 
         if cmd in ("velocidade", "speed", "tps"):
@@ -3381,66 +3553,54 @@ class Sidebar(Gtk.ApplicationWindow):
             self.history.set_model(pid, None)
             self.history.save()
             self._sync_selectors()
+            self._aplicar_troca_modelo()
             self._add_interface("Provider set to **%s**." % provider.name)
             return True
 
         if cmd in ("agente", "agent"):
-            ligado = bool(self.config.get("agent.enabled", False))
-            if not args:
-                self._add_interface(
-                    "## Modo agente\n\n"
-                    "Agora: **%s**\n\n"
-                    "Ligado, o modelo pode rodar comandos nesta maquina para "
-                    "responder. Comandos de leitura rodam direto; qualquer "
-                    "coisa que altere o sistema mostra o comando exato e "
-                    "espera voce clicar em **Permitir**.\n\n"
-                    "`/agente on` liga, `/agente off` desliga. Vale para o "
-                    "Ollama com modelos que suportam ferramentas.\n\n"
-                    "> Testado apenas com o `qwen3.5:9b`. Outros modelos "
-                    "deveriam funcionar, mas nao foram verificados." %
-                    ("ligado" if ligado else "desligado"))
-                return True
-            escolha = args[0].lower()
-            if escolha not in ("on", "off", "ligado", "desligado"):
-                self._add_interface("Use `/agente on` ou `/agente off`.")
-                return True
-            novo = escolha in ("on", "ligado")
-            self.config.set("agent.enabled", novo)
-            try:
-                self.config.save()
-            except Exception as exc:
-                _warn("config.save failed: %r" % (exc,))
-            self._sync_agent_btn()
-            self.show_banner(
-                "Modo agente ligado" if novo else "Modo agente desligado", 3000)
+            self._add_interface(
+                "## Modo agente\n\n"
+                "O agente agora **e** o backend: todo turno passa pelo "
+                "Hermes, que le arquivos, roda comandos e usa ferramentas "
+                "quando a pergunta pede.\n\n"
+                "O que altera o sistema aparece aqui na conversa e espera "
+                "voce clicar em **Permitir** ou **Negar** — nao ha mais o "
+                "que ligar ou desligar.")
             return True
 
         if cmd == "think":
-            validos = ("auto", "on", "off", "low", "medium", "high")
-            atual = str(self.config.get("ollama.think", "off") or "off").lower()
+            validos = ("on", "off", "low", "medium", "high")
+            visivel = bool(self.config.get("hermes.show_thinking", True))
+            esforco = str(self.config.get("hermes.reasoning_effort", "") or "")
             if not args:
                 self._add_interface(
                     "## Raciocinio\n\n"
-                    "Agora: `%s`\n\n"
-                    "- `auto` - o modelo decide\n"
-                    "- `off` - sem rascunho, respostas bem mais rapidas\n"
-                    "- `on` - forca o rascunho\n"
-                    "- `low` / `medium` / `high` - esforco, nos modelos que aceitam\n\n"
-                    "Troque com `/think off`. Vale para o Ollama; "
-                    "Claude e Gemini tem os proprios ajustes." % atual)
+                    "Rascunho na conversa: **%s**  ·  esforco: `%s`\n\n"
+                    "- `on` / `off` - mostra ou esconde o rascunho do modelo\n"
+                    "- `low` / `medium` / `high` - esforco de raciocinio "
+                    "(vale a partir da **proxima** conversa)\n"
+                    % ("visivel" if visivel else "escondido",
+                       esforco or "padrao"))
                 return True
             escolha = args[0].lower()
             if escolha not in validos:
                 self._add_interface("`%s` nao serve. Use: %s."
                                     % (escolha, ", ".join("`%s`" % v for v in validos)))
                 return True
-            self.config.set("ollama.think", escolha)
+            if escolha in ("on", "off"):
+                self.config.set("hermes.show_thinking", escolha == "on")
+                aviso = ("Raciocinio visivel" if escolha == "on"
+                         else "Raciocinio escondido")
+            else:
+                self.config.set("hermes.reasoning_effort", escolha)
+                aviso = ("Esforco de raciocinio: %s (vale na proxima conversa)"
+                         % escolha)
             try:
                 self.config.save()
             except Exception as exc:
                 _warn("config.save failed: %r" % (exc,))
             self._sync_think_btn()
-            self.show_banner("Raciocinio: %s" % escolha, 3000)
+            self.show_banner(aviso, 3500)
             return True
 
         if cmd == "model":
@@ -3476,6 +3636,7 @@ class Sidebar(Gtk.ApplicationWindow):
             self.history.set_model(pid, match.id)
             self.history.save()
             self._sync_selectors()
+            self._aplicar_troca_modelo()
             self._add_interface("Model set to **%s**." % match.name)
             return True
 
@@ -3487,13 +3648,17 @@ class Sidebar(Gtk.ApplicationWindow):
             if self._provider_by_id(pid) is None:
                 self._add_interface("Unknown provider: `%s`." % pid)
                 return True
-            try:
-                self.registry.set_api_key(pid, value)
-            except Exception as exc:
-                self._add_interface("Could not store the key: `%s`" % exc)
-                return True
-            self._sync_selectors()
-            self._add_interface("API key stored for **%s**." % pid)
+
+            # model.save_key e uma RPC (o Hermes valida e recarrega a lista
+            # de modelos) -- fora do main loop.
+            def feito(_r):
+                self._add_interface("API key stored for **%s**." % pid)
+                self.rescan_providers()
+
+            self._hermes_async(
+                lambda: self.registry.set_api_key(pid, value), on_ok=feito,
+                on_err=lambda e: self._add_interface(
+                    "Could not store the key: `%s`" % e))
             return True
 
         if cmd == "keys":
@@ -3502,6 +3667,61 @@ class Sidebar(Gtk.ApplicationWindow):
                 state = "set" if provider.available else (provider.hint or "missing")
                 lines.append("- `%s` — %s" % (provider.id, state))
             self._add_interface("\n".join(lines))
+            return True
+
+        # Comando que o painel nao conhece: pode ser um comando nativo do
+        # Hermes (/memoria, /skills, /compact...). Vai para o gateway.
+        executar = getattr(self.registry, "slash_exec", None)
+        if callable(executar):
+            comando = text
+
+            def feito(resp):
+                if not isinstance(resp, dict):
+                    resp = {"output": str(resp or "")}
+                tipo = str(resp.get("type") or "output")
+                if tipo == "alias":
+                    alvo = str(resp.get("target") or "").strip()
+                    if alvo:
+                        # cada salto de alias volta aqui por outra RPC; sem
+                        # o limite um alias circular vira loop infinito
+                        if profundidade >= 5:
+                            self._add_interface(
+                                "Alias em loop (%d saltos): parei em `%s`."
+                                % (profundidade, alvo))
+                            return
+                        self._handle_command(
+                            alvo if alvo.startswith("/") else "/" + alvo,
+                            profundidade + 1)
+                        return
+                elif tipo == "prefill":
+                    # /undo e afins: o gateway rebobinou o transcript e
+                    # devolve o texto do turno desfeito para reeditar.
+                    aviso = str(resp.get("notice") or "").strip()
+                    if aviso:
+                        self._add_interface(aviso)
+                    msg = str(resp.get("message") or "")
+                    if msg:
+                        self._set_input_text(msg)
+                    return
+                elif tipo in ("send", "skill"):
+                    # O comando expandiu para um prompt (skill, bundle,
+                    # /queue): o modelo recebe a mensagem inteira, mas a
+                    # conversa mostra so a projecao curta.
+                    aviso = str(resp.get("notice") or "").strip()
+                    if aviso:
+                        self._add_interface(aviso)
+                    msg = str(resp.get("message") or "")
+                    if msg:
+                        self._enviar_prompt_hermes(
+                            msg, str(resp.get("display") or ""))
+                        return
+                saida = str(resp.get("output") or "")
+                self._add_interface(saida.strip() or "_(sem saida)_")
+
+            self._hermes_async(
+                lambda: executar(comando), on_ok=feito,
+                on_err=lambda e: self._add_interface(
+                    "`/%s` falhou no Hermes: `%s`\n\nTente `/help`." % (cmd, e)))
             return True
 
         self._add_interface("Unknown command: `/%s`. Try `/help`." % cmd)
@@ -3523,7 +3743,10 @@ class Sidebar(Gtk.ApplicationWindow):
         GLib.idle_add(self._submit)
 
     def _submit(self):
-        if self._cancel is not None:
+        # _cancel cobre o turno em andamento; _stream_pendente cobre a
+        # janela entre o agendamento (idle_add) e o _start_stream rodar,
+        # senao dois envios rapidos viram dois turnos e o primeiro orfa.
+        if self._cancel is not None or self._stream_pendente:
             return
         text = self._input_text().strip()
         if not text:
@@ -3534,12 +3757,9 @@ class Sidebar(Gtk.ApplicationWindow):
             self._handle_command(text)
             return
 
-        # A mensagem do usuario aparece primeiro, sempre. Qualquer checagem
-        # antes disso atrasa o retorno visual do Enter.
-        self._set_input_text("")
-        self._append_row(ROLE_USER, text)
-        self.history.save()
-
+        # Gates ANTES de gravar: uma mensagem que nao vai ser enviada nao
+        # entra na conversa (ficaria orfa no historico e sairia dobrada no
+        # retry) — e o texto fica no input para o usuario tentar de novo.
         provider = self._provider_by_id(self.history.provider)
         if provider is None:
             self.show_banner("No provider selected.", 0)
@@ -3555,26 +3775,36 @@ class Sidebar(Gtk.ApplicationWindow):
             self.show_banner("No model selected — use /model to pick one.", 0)
             return
 
+        self._set_input_text("")
+        self._append_row(ROLE_USER, text)
+        self.history.save()
+
         # o stream comeca no proximo ciclo do loop, para o GTK desenhar a
         # mensagem e o indicador antes de qualquer trabalho de rede
+        self._stream_pendente = True
         GLib.idle_add(self._start_stream)
 
-    # Sem isto o modelo responde escrevendo o comando como texto, esperando
-    # que o usuario o rode. Tendo a ferramenta, ele precisa ouvir que rodar e
-    # com ele -- e que negar nao e motivo para insistir.
-    _PROMPT_AGENTE = (
-        "\n\nYou can run commands on this machine with the run_shell tool. "
-        "When the answer depends on the actual state of the system — files, "
-        "packages, services, hardware, logs — call the tool instead of "
-        "printing a command for the user to run. Chain calls when one result "
-        "leads to the next.\n"
-        "Read-only commands run immediately. Anything that changes the system "
-        "is shown to the user, who approves or refuses it, so say what you are "
-        "about to change and why before asking. If a command is refused, do "
-        "not retry it: explain what it would have done, or offer another way."
-    )
+    def _enviar_prompt_hermes(self, message, display=""):
+        """Turno cujo texto enviado difere do que aparece na conversa.
+
+        Comandos do Hermes que expandem para um prompt (skills, bundles,
+        /queue) mandam o scaffolding completo ao modelo; a conversa mostra
+        a projecao curta.  O historico guarda o texto completo — e ele que
+        vai no submit.
+        """
+        if self._cancel is not None or self._stream_pendente:
+            self.show_banner("Espere a resposta atual terminar.", 3000)
+            return
+        registro = self.history.add(ROLE_USER, message)
+        self._append_row(ROLE_USER, display or message,
+                         msg_id=registro.get("id"), persist=False)
+        self.history.save()
+        self._stream_pendente = True
+        GLib.idle_add(self._start_stream)
 
     def _system_prompt(self):
+        # O system prompt de verdade e do Hermes (~/.hermes/config.yaml);
+        # este aqui so segue existindo para o contrato do stream_events.
         base = ""
         resolver = getattr(self.config, "system_prompt", None)
         if callable(resolver):
@@ -3584,8 +3814,6 @@ class Sidebar(Gtk.ApplicationWindow):
                 _warn("config.system_prompt() failed: %r" % (exc,))
         if not base:
             base = self.config.get("chat.system_prompt", "") or ""
-        if self._agente_ligado():
-            base = base + self._PROMPT_AGENTE
         return base
 
     def _build_request_messages(self):
@@ -3596,19 +3824,12 @@ class Sidebar(Gtk.ApplicationWindow):
         messages = []
         for m in self.history.messages:
             papel = m.get("role")
-            if papel not in (ROLE_USER, ROLE_ASSISTANT, "tool"):
+            if papel not in (ROLE_USER, ROLE_ASSISTANT):
                 continue
             texto = m.get("content") or ""
-            # Um turno de assistente sem texto so vale se pediu ferramenta;
-            # o turno "tool" e a resposta dela, e nunca e vazio.
-            if not texto.strip() and not m.get("tool_calls"):
+            if not texto.strip():
                 continue
-            turno = {"role": papel, "content": texto}
-            if m.get("tool_calls"):
-                turno["tool_calls"] = m["tool_calls"]
-            if papel == "tool" and m.get("tool_name"):
-                turno["tool_name"] = m["tool_name"]
-            messages.append(turno)
+            messages.append({"role": papel, "content": texto})
         if limit > 0:
             messages = messages[-limit:]
         return messages
@@ -3624,6 +3845,9 @@ class Sidebar(Gtk.ApplicationWindow):
         return threading.Event()
 
     def _start_stream(self):
+        self._stream_pendente = False
+        if self._cancel is not None:        # turno ja comecou por outra via
+            return
         messages = self._build_request_messages()
         if not messages:
             self.show_banner("Nothing to send.", 3000)
@@ -3646,6 +3870,11 @@ class Sidebar(Gtk.ApplicationWindow):
         cancel = self._make_cancel()
         self._cancel = cancel
 
+        # estado dos widgets estruturais deste turno (Hermes)
+        self._hermes_tools = {}
+        self._aprovacoes = {}
+        self._clarifies = {}
+
         self._send_btn.set_icon_name("media-playback-stop-symbolic")
         self._send_btn.set_tooltip_text("Stop generating (Escape)")
         self._send_btn.add_css_class("stop-btn")
@@ -3663,16 +3892,13 @@ class Sidebar(Gtk.ApplicationWindow):
     def _stream_worker(self, seq, provider_id, model_id, messages, system, cancel):
         """Runs OFF the main loop.  Never touches a widget directly."""
         error = None
-        self._done_reason = None
-        self._tool_calls = []
         try:
             # Nem todo registry expoe stream_events; cair para o stream de
             # texto puro e melhor do que quebrar o envio.
             eventos_fn = getattr(self.registry, "stream_events", None)
             if callable(eventos_fn):
                 eventos = eventos_fn(
-                    provider_id, model_id, messages, system, cancel,
-                    self._ferramentas_ativas())
+                    provider_id, model_id, messages, system, cancel)
             else:
                 eventos = _somente_texto(self.registry.stream(
                     provider_id, model_id, messages, system, cancel))
@@ -3681,10 +3907,15 @@ class Sidebar(Gtk.ApplicationWindow):
                     break
                 kind = getattr(ev, "kind", "text")
                 if kind == "usage":
-                    self._done_reason = (ev.data or {}).get("done_reason")
                     continue
-                if kind == "tool":
-                    self._tool_calls.append(dict(ev.data or {}))
+                if kind in ("tool_start", "tool_done", "approval",
+                            "approval_expire", "clarify", "clarify_expire",
+                            "status", "meta"):
+                    # Eventos estruturais do Hermes nao coalescem: cada um vai
+                    # inteiro para o main loop, que descarrega o texto
+                    # pendente antes para preservar a ordem na conversa.
+                    GLib.idle_add(self._on_turn_event, seq, kind,
+                                  dict(getattr(ev, "data", None) or {}))
                     continue
                 if kind not in ("text", "thinking"):
                     continue
@@ -3697,7 +3928,7 @@ class Sidebar(Gtk.ApplicationWindow):
                     self._t_primeiro = time.monotonic()
                 self._n_tokens += 1
                 with self._pending_lock:
-                    self._pending_deltas.append((kind, delta))
+                    self._pending_deltas.append((seq, kind, delta))
                     schedule = self._flush_id == 0
                     if schedule:
                         self._flush_id = -1
@@ -3708,13 +3939,21 @@ class Sidebar(Gtk.ApplicationWindow):
         GLib.idle_add(self._on_stream_done, seq, error, cancel_is_set(cancel))
 
     def _drenar_pendentes(self):
-        """Junta os deltas acumulados, preservando a ordem entre os tipos."""
+        """Junta os deltas acumulados, preservando a ordem entre os tipos.
+
+        Cada delta carrega o seq do turno que o gerou: um worker
+        abandonado pode empurrar sobras para a fila depois que a conversa
+        mudou, e elas nao podem vazar para a linha do turno novo.
+        """
         with self._pending_lock:
             itens = self._pending_deltas
             self._pending_deltas = []
             self._flush_id = 0
+        atual = self._stream_seq        # _stream_seq so muda no main loop
         blocos = []
-        for kind, texto in itens:
+        for sq, kind, texto in itens:
+            if sq != atual:
+                continue
             if blocos and blocos[-1][0] == kind:
                 blocos[-1][1].append(texto)
             else:
@@ -3729,16 +3968,287 @@ class Sidebar(Gtk.ApplicationWindow):
                 row.append_content(texto)
 
     def _flush_deltas(self, seq):
+        # A drenagem ja filtra por turno, entao um flush agendado por um
+        # turno abandonado entrega os deltas do turno ATUAL — nunca joga
+        # fora texto do turno novo nem aplica sobras do velho.
         blocos = self._drenar_pendentes()
-        if not blocos:
-            return GLib.SOURCE_REMOVE
-        if seq != self._stream_seq or self._active_row is None:
+        if not blocos or self._active_row is None:
             return GLib.SOURCE_REMOVE
         self._aplicar_blocos(self._active_row, blocos)
         try:
-            self.history.replace_last_content(self._active_row.content)
+            self.history.replace_content(self._active_row.msg_id,
+                                         self._active_row.content)
         except Exception as exc:
-            _warn("history.replace_last_content failed: %r" % (exc,))
+            _warn("history.replace_content failed: %r" % (exc,))
+        return GLib.SOURCE_REMOVE
+
+    # ------------------------------------------------------------------
+    # Eventos estruturais do turno (Hermes): ferramentas, aprovacao, status
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _tool_cmd_text(data):
+        """Linha curta que identifica a chamada: contexto ou args compactos."""
+        contexto = str(data.get("context") or data.get("args_text") or "").strip()
+        if contexto:
+            return contexto
+        args = data.get("args")
+        if isinstance(args, dict) and args:
+            try:
+                return json.dumps(args, ensure_ascii=False)[:400]
+            except (TypeError, ValueError):
+                pass
+        return str(data.get("name") or "")
+
+    def _on_turn_event(self, seq, kind, data):
+        """Roda no main loop. O texto pendente desce antes do widget novo,
+        para o bloco de ferramenta aparecer depois do texto que o precedeu."""
+        if seq != self._stream_seq:
+            return GLib.SOURCE_REMOVE
+        blocos = self._drenar_pendentes()
+        if blocos and self._active_row is not None:
+            self._aplicar_blocos(self._active_row, blocos)
+
+        if kind == "tool_start":
+            bloco = ToolBlock(self._tool_cmd_text(data), False, None,
+                              titulo=str(data.get("name") or "tool"))
+            tid = str(data.get("tool_id") or "")
+            if tid:
+                self._hermes_tools[tid] = bloco
+            self._anexar_widget(bloco)
+        elif kind == "tool_done":
+            tid = str(data.get("tool_id") or "")
+            bloco = self._hermes_tools.pop(tid, None)
+            if bloco is None:
+                # tool.start perdido (ex.: reconexao): cria ja completo
+                bloco = ToolBlock(self._tool_cmd_text(data), False, None,
+                                  titulo=str(data.get("name") or "tool"))
+                self._anexar_widget(bloco)
+            bloco.marcar("pronto", 0)
+            saida = data.get("summary") or data.get("result_text") \
+                or data.get("result") or ""
+            bloco.mostrar_saida(str(saida)[:4000])
+        elif kind == "approval":
+            bloco = ApprovalBlock(data, self._responder_aprovacao)
+            rid = str(data.get("request_id") or "")
+            if rid:
+                self._aprovacoes[rid] = bloco
+            self._anexar_widget(bloco)
+        elif kind == "approval_expire":
+            bloco = self._aprovacoes.pop(str(data.get("request_id") or ""), None)
+            if bloco is not None:
+                bloco.expirar()
+        elif kind == "clarify":
+            bloco = ClarifyBlock(data, self._responder_clarify)
+            rid = str(data.get("request_id") or "")
+            if rid:
+                self._clarifies.setdefault(rid, []).append(bloco)
+            self._anexar_widget(bloco)
+        elif kind == "clarify_expire":
+            for bloco in self._clarifies.pop(
+                    str(data.get("request_id") or ""), []):
+                bloco.expirar()
+        elif kind == "status":
+            texto = str(data.get("text") or "").strip()
+            if texto:
+                self._status_label.set_text(texto[:120])
+        elif kind == "meta":
+            self._aplicar_session_info(data)
+        return GLib.SOURCE_REMOVE
+
+    def _responder_aprovacao(self, escolha, request_id):
+        self._aprovacoes.pop(request_id, None)
+        responder = getattr(self.registry, "respond_approval", None)
+        if callable(responder):
+            responder(escolha, request_id)
+
+    def _responder_clarify(self, texto, request_id, question_id=""):
+        responder = getattr(self.registry, "respond_clarify", None)
+        if callable(responder):
+            responder(texto, request_id, question_id)
+
+    def _aplicar_session_info(self, info):
+        """session.info do Hermes: modelo/provedor correntes da sessao."""
+        modelo = str(info.get("model") or "")
+        provedor = str(info.get("provider") or "")
+        if modelo and (modelo != self.history.model
+                       or (provedor and provedor != self.history.provider)):
+            self.history.set_model(provedor or self.history.provider, modelo)
+            self._sync_selectors()
+
+    def _hermes_async(self, trabalho, on_ok=None, on_err=None):
+        """Roda uma RPC do Hermes fora do main loop; o resultado volta por
+        idle_add.  Sem on_err, o erro vira um banner."""
+        def _no_main(cb, valor):
+            def run():
+                cb(valor)
+                return GLib.SOURCE_REMOVE
+            GLib.idle_add(run)
+
+        def run():
+            try:
+                resultado = trabalho()
+            except Exception as exc:
+                if on_err is not None:
+                    _no_main(on_err, exc)
+                else:
+                    _no_main(lambda e: self.show_banner("Hermes: %s" % e, 8000),
+                             exc)
+                return
+            if on_ok is not None:
+                _no_main(on_ok, resultado)
+
+        threading.Thread(target=run, name="hyde-ai-hermes-rpc",
+                         daemon=True).start()
+
+    def _carregar_comandos_hermes(self):
+        """Puxa o catalogo de slash commands do Hermes para a paleta.
+
+        Uma vez por vida do gateway basta; comandos locais tem precedencia
+        (a paleta concatena COMANDOS primeiro)."""
+        if getattr(self, "_comandos_hermes", None):
+            return
+        catalogo_fn = getattr(self.registry, "commands_catalog", None)
+        if not callable(catalogo_fn):
+            return
+        locais = {c[0] for c in COMANDOS}
+
+        def feito(pares):
+            vistos = set()
+            resultado = []
+            for par in pares or []:
+                try:
+                    nome, descricao = str(par[0]), str(par[1])
+                except (TypeError, IndexError, ValueError):
+                    continue
+                if not nome.startswith("/"):
+                    nome = "/" + nome
+                if nome in locais or nome in vistos:
+                    continue
+                vistos.add(nome)
+                resultado.append((nome, "", "%s  · hermes" % descricao))
+            self._comandos_hermes = resultado
+
+        self._hermes_async(catalogo_fn, on_ok=feito,
+                           on_err=lambda _e: None)
+
+    def _mostrar_sessoes_hermes(self, sessoes):
+        """Renderiza o session.list do Hermes e guarda a lista para o
+        `/historico abrir <n|id>`."""
+        self._sessoes_hermes = list(sessoes or [])
+        if not self._sessoes_hermes:
+            self._add_interface("Nenhuma conversa no Hermes ainda.")
+            return
+        linhas = ["## Conversas no Hermes", ""]
+        for n, s in enumerate(self._sessoes_hermes, start=1):
+            titulo = str(s.get("title") or s.get("preview") or "(sem titulo)")
+            # started_at e epoch Unix (float); ISO fica como fallback
+            bruto = s.get("started_at")
+            try:
+                quando = time.strftime("%d/%m %H:%M",
+                                       time.localtime(float(bruto)))
+            except (TypeError, ValueError):
+                quando = str(bruto or "")[:16].replace("T", " ")
+            linhas.append("%d. **%s** — %s · %d msgs · `%s`"
+                          % (n, titulo[:60], quando,
+                             int(s.get("message_count") or 0),
+                             str(s.get("id") or "")[:8]))
+        linhas += ["", "Abra com `/historico abrir <n>` (ou o inicio do id)."]
+        self._add_interface("\n".join(linhas))
+
+    def _abrir_sessao_hermes(self, alvo):
+        """Resolve <n|id> contra a ultima listagem e faz o resume."""
+        sessoes = getattr(self, "_sessoes_hermes", [])
+        stored = None
+        if alvo.isdigit() and 1 <= int(alvo) <= len(sessoes):
+            stored = str(sessoes[int(alvo) - 1].get("id") or "")
+        else:
+            for s in sessoes:
+                if str(s.get("id") or "").startswith(alvo):
+                    stored = str(s.get("id"))
+                    break
+        retomar = getattr(self.registry, "resume", None)
+        if not callable(retomar):
+            self._add_interface("Resume indisponivel.")
+            return
+        listar = getattr(self.registry, "list_sessions", None)
+
+        def trabalho():
+            chave = stored
+            if chave is None and callable(listar):
+                # session.resume so aceita id/titulo EXATOS; um prefixo
+                # digitado e resolvido aqui, ja na thread de rede.
+                for s in listar() or []:
+                    sid = str(s.get("id") or "")
+                    if sid.startswith(alvo):
+                        chave = sid
+                        break
+            return retomar(chave if chave is not None else alvo)
+
+        def feito(resp):
+            self._reconstruir_do_resume(resp)
+
+        self.show_banner("Abrindo a conversa...", 2000)
+        self._hermes_async(trabalho, on_ok=feito)
+
+    def _reconstruir_do_resume(self, resp):
+        """Conversa antiga do Hermes vira a conversa atual do cache local."""
+        mensagens = list((resp or {}).get("messages") or [])
+        info = (resp or {}).get("info") or {}
+        try:
+            self.history.new_conversation(self.history.provider,
+                                          self.history.model)
+        except Exception as exc:
+            _warn("new_conversation falhou: %r" % (exc,))
+        for m in mensagens:
+            papel = str(m.get("role") or "")
+            texto = str(m.get("text") or m.get("content") or "")
+            if papel in (ROLE_USER, ROLE_ASSISTANT) and texto.strip():
+                try:
+                    self.history.add(papel, texto,
+                                     name=str(info.get("model") or "") or None)
+                except Exception:
+                    pass
+        titulo = str(info.get("title") or "").strip()
+        if titulo:
+            try:
+                self.history.current["titulo"] = titulo
+            except Exception:
+                pass
+        vincular = getattr(self.history, "set_hermes_session", None)
+        if callable(vincular):
+            vincular((resp or {}).get("session_key")
+                     or getattr(self.registry, "stored_session_id", ""))
+        try:
+            self.history.save()
+        except Exception:
+            pass
+        self.reload_conversation()
+        self.show_banner("Conversa aberta — a proxima mensagem continua dela.",
+                         3500)
+
+    def _on_hermes_background(self, params):
+        """Eventos do Hermes fora de um turno.  Roda no main loop."""
+        tipo = str(params.get("type") or "")
+        payload = params.get("payload") or {}
+        if tipo == "session.title":
+            titulo = str(payload.get("title") or "").strip()
+            if titulo:
+                try:
+                    self.history.current["titulo"] = titulo
+                except Exception:
+                    pass
+        elif tipo == "notification.show":
+            texto = str(payload.get("text") or "").strip()
+            if texto:
+                self.show_banner(texto, int(payload.get("ttl_ms") or 6000))
+        elif tipo == "gateway.died":
+            self.show_banner("O backend Hermes caiu — tentando de novo...", 0)
+            self._status_label.set_text("hermes fora do ar")
+        elif tipo == "gateway.restarted":
+            self.show_banner("Backend Hermes de volta.", 3000)
+            self.rescan_providers()
+        elif tipo == "session.info":
+            self._aplicar_session_info(payload)
         return GLib.SOURCE_REMOVE
 
     def _on_stream_done(self, seq, error, cancelled):
@@ -3754,19 +4264,14 @@ class Sidebar(Gtk.ApplicationWindow):
         if row is not None:
             row.finish_thinking()
 
-        # Um modelo de raciocinio que gasta todo o orcamento pensando termina
-        # sem resposta nenhuma. Sem este aviso a bolha fica vazia e sem
-        # explicacao.
+        # Um turno que termina sem texto nenhum (so raciocinio, ou so
+        # ferramentas) deixaria a bolha vazia e sem explicacao.
         if (row is not None and not error and not cancelled
-                and not row.content.strip() and getattr(row, "thinking", "")):
-            if self._done_reason == "length":
-                self.show_banner(
-                    "The model used the whole token budget on reasoning and never "
-                    "reached an answer — raise max_tokens in the config.",
-                    timeout_ms=0,
-                )
-            else:
+                and not row.content.strip()):
+            if getattr(row, "thinking", ""):
                 self.show_banner("The model returned only reasoning, no answer.", 6000)
+            else:
+                self.show_banner("The turn ended without an answer.", 6000)
 
         # metricas desta resposta: tempo ate o 1o token (o "pensando") e a
         # velocidade de geracao dela propria
@@ -3801,7 +4306,7 @@ class Sidebar(Gtk.ApplicationWindow):
                 self.show_banner("Request failed: %s" % error, 0)
             row.set_streaming(False)
             try:
-                self.history.replace_last_content(row.content)
+                self.history.replace_content(row.msg_id, row.content)
             except Exception:
                 pass
 
@@ -3809,168 +4314,79 @@ class Sidebar(Gtk.ApplicationWindow):
         self._worker = None
         self._active_row = None
 
-        # O modelo pediu ferramenta: o turno nao acabou, so mudou de mao.
-        # Executar (ou pedir permissao) e continuar de onde parou.
-        chamadas = getattr(self, "_tool_calls", None)
-        if chamadas and not error and not cancelled:
-            self._tool_calls = []
-            self._executar_ferramentas(chamadas)
-            return GLib.SOURCE_REMOVE
+        # Turno encerrado: cartao de aprovacao sem resposta ja nao vale mais
+        # (o gateway resolveu ou o interrupt negou tudo do lado de la).
+        for bloco in self._aprovacoes.values():
+            try:
+                bloco.expirar()
+            except Exception:
+                pass
+        self._aprovacoes = {}
+        for blocos in self._clarifies.values():
+            for bloco in blocos:
+                try:
+                    bloco.expirar()
+                except Exception:
+                    pass
+        self._clarifies = {}
+        self._hermes_tools = {}
 
-        self._tool_calls = []
-        self._passo_agente = 0
         self._send_btn.set_icon_name("go-up-symbolic")
         self._send_btn.set_tooltip_text("Send (Enter)")
         self._send_btn.remove_css_class("stop-btn")
         self._status_label.set_text(self.history.model or "")
         self._update_send_state()
+        # Vincula a conversa local a sessao do Hermes (chave duravel), para
+        # o restore continuar de onde parou.
+        vinculo = getattr(self.registry, "stored_session_id", None)
+        if vinculo and hasattr(self.history, "set_hermes_session"):
+            self.history.set_hermes_session(vinculo)
         try:
             self.history.save()
         except Exception as exc:
             _warn("history save failed: %r" % (exc,))
         return GLib.SOURCE_REMOVE
-
-    # ------------------------------------------------------------------
-    # Modo agente
-    # ------------------------------------------------------------------
-    def _agente_ligado(self):
-        if _agent is None:
-            return False
-        if not bool(self.config.get("agent.enabled", False)):
-            return False
-        # So o Ollama esta ligado ao protocolo de ferramentas por enquanto.
-        return self.history.provider == "ollama"
-
-    def _ferramentas_ativas(self):
-        return _agent.FERRAMENTAS if self._agente_ligado() else None
-
-    def _executar_ferramentas(self, chamadas):
-        """Roda o que o modelo pediu e devolve o resultado para ele.
-
-        Um passo de cada vez: se o comando precisa de permissao, a cadeia para
-        aqui ate o clique. As chamadas restantes ficam na fila.
-        """
-        limite = 8
-        try:
-            limite = int(self.config.get("agent.max_steps", 8))
-        except (TypeError, ValueError):
-            pass
-        self._passo_agente = getattr(self, "_passo_agente", 0) + 1
-        if self._passo_agente > max(1, limite):
-            self.show_banner(
-                "O agente parou depois de %d passos — peça de novo se quiser "
-                "que ele continue." % limite, 6000)
-            self._passo_agente = 0
-            self._finalizar_turno()
-            return
-
-        # O pedido do modelo entra no historico antes do resultado, senao ele
-        # perde de vista o que foi que pediu.
-        try:
-            self.history.add_tool_call([
-                {"id": c.get("id") or "", "type": "function",
-                 "function": {"name": c.get("name"),
-                              "arguments": c.get("arguments") or {}}}
-                for c in chamadas])
-        except Exception as exc:
-            _warn("nao consegui registrar a chamada: %r" % (exc,))
-
-        self._fila_ferramentas = list(chamadas)
-        self._proxima_ferramenta()
-
-    def _proxima_ferramenta(self):
-        fila = getattr(self, "_fila_ferramentas", None)
-        if not fila:
-            self._continuar_agente()
-            return
-        chamada = fila.pop(0)
-        nome = chamada.get("name") or ""
-        args = chamada.get("arguments") or {}
-        cmd = str(args.get("cmd") or "").strip()
-
-        if nome != "run_shell" or not cmd:
-            self._registrar_resultado(nome or "?", cmd,
-                                      "(ferramenta desconhecida)", 1)
-            return
-
-        precisa_ok = not _agent.so_leitura(cmd)
-        # Rastro no log: sem isto nao da para distinguir "rodou porque era
-        # leitura" de "rodou porque o usuario permitiu".
-        _warn("agente: %s | %s" % ("PEDE PERMISSAO" if precisa_ok
-                                   else "leitura, roda direto", cmd))
-        bloco = ToolBlock(cmd, precisa_ok,
-                          lambda ok, c=cmd: self._decidido(ok, c))
-        self._bloco_atual = bloco
-        self._anexar_widget(bloco)
-
-        if not precisa_ok:
-            GLib.idle_add(self._rodar_comando, cmd, bloco)
-
-    def _decidido(self, ok, cmd):
-        bloco = getattr(self, "_bloco_atual", None)
-        _warn("agente: usuario %s | %s" % ("PERMITIU" if ok else "NEGOU", cmd))
-        if not ok:
-            if bloco is not None:
-                bloco.marcar("negado")
-            self._registrar_resultado(
-                "run_shell", cmd,
-                "O usuario negou este comando. Nao tente rodar de novo; "
-                "explique o que faria ou proponha outro caminho.", 1)
-            return
-        if bloco is not None:
-            bloco.marcar("rodando")
-        GLib.idle_add(self._rodar_comando, cmd, bloco)
-
-    def _rodar_comando(self, cmd, bloco):
-        tempo = 45
-        try:
-            tempo = int(self.config.get("agent.timeout", 45))
-        except (TypeError, ValueError):
-            pass
-
-        def trabalho():
-            saida, codigo = _agent.executar(cmd, timeout=tempo)
-            GLib.idle_add(self._comando_terminou, cmd, bloco, saida, codigo)
-
-        threading.Thread(target=trabalho, name="hyde-ai-tool",
-                         daemon=True).start()
-        return GLib.SOURCE_REMOVE
-
-    def _comando_terminou(self, cmd, bloco, saida, codigo):
-        if bloco is not None:
-            bloco.marcar("pronto", codigo)
-            bloco.mostrar_saida(saida)
-        self._registrar_resultado("run_shell", cmd, saida, codigo)
-        return GLib.SOURCE_REMOVE
-
-    def _registrar_resultado(self, nome, cmd, saida, codigo):
-        try:
-            self.history.add_tool_result(
-                nome, _agent.resultado_para_modelo(cmd, saida, codigo))
-        except Exception as exc:
-            _warn("nao consegui registrar o resultado: %r" % (exc,))
-        self._proxima_ferramenta()
-
-    def _continuar_agente(self):
-        """Volta ao modelo com os resultados na mao."""
-        self.history.save()
-        GLib.idle_add(self._start_stream)
-
-    def _finalizar_turno(self):
-        self._send_btn.set_icon_name("go-up-symbolic")
-        self._send_btn.set_tooltip_text("Send (Enter)")
-        self._send_btn.remove_css_class("stop-btn")
-        self._status_label.set_text(self.history.model or "")
-        self._update_send_state()
-        try:
-            self.history.save()
-        except Exception as exc:
-            _warn("history save failed: %r" % (exc,))
 
     def _stop_stream(self):
         if self._cancel is not None:
             cancel_request(self._cancel)
             self._status_label.set_text("stopping…")
+
+    def _abandon_stream(self):
+        """Solta o turno ativo da interface sem esperar o worker terminar.
+
+        Para trocas de conversa no meio de um stream (restore, /clear,
+        apagar a linha ativa): pede o interrupt, invalida o seq — os
+        callbacks pendentes do turno velho viram no-ops — e limpa o
+        estado visual.  O worker morre sozinho drenando o gerador.
+        """
+        if self._cancel is not None:
+            cancel_request(self._cancel)
+        self._stream_seq += 1
+        self._cancel = None
+        self._worker = None
+        self._active_row = None
+        with self._pending_lock:
+            self._pending_deltas = []
+        for bloco in self._aprovacoes.values():
+            try:
+                bloco.expirar()
+            except Exception:
+                pass
+        self._aprovacoes = {}
+        for blocos in self._clarifies.values():
+            for bloco in blocos:
+                try:
+                    bloco.expirar()
+                except Exception:
+                    pass
+        self._clarifies = {}
+        self._hermes_tools = {}
+        self._send_btn.set_icon_name("go-up-symbolic")
+        self._send_btn.set_tooltip_text("Send (Enter)")
+        self._send_btn.remove_css_class("stop-btn")
+        self._status_label.set_text(self.history.model or "")
+        self._update_send_state()
 
     # ------------------------------------------------------------------
     # Theme reload hook

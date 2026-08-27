@@ -1,34 +1,17 @@
 {
-  "_comentario": "Copie para ~/.config/hyde-ai/config.json. Chaves de API ficam aqui; o arquivo e gravado com permissao 0600.",
-  "provider": "ollama",
-  "models": {
-    "anthropic": "claude-opus-5",
-    "gemini": "gemini-3.7-flash",
-    "openai": "gpt-5.6-sol",
-    "ollama": ""
-  },
-  "api_keys": {
-    "anthropic": "",
-    "gemini": "",
-    "openai": ""
+  "_comentario": "Copie para ~/.config/hyde-ai/config.json (o install.sh faz isso). O backend e o Hermes Agent: as chaves de API e o modelo padrao moram em ~/.hermes/, nao aqui.",
+  "hermes": {
+    "python": "",
+    "path": "",
+    "model": "",
+    "provider": "",
+    "reasoning_effort": "",
+    "show_thinking": true
   },
   "sidebar": {
     "edge": "right",
     "width_fraction": 0.34,
     "width_min": 420,
     "width_max": 900
-  },
-  "max_tokens": 8192,
-  "request": {
-    "connect_timeout": 15.0,
-    "read_timeout": 180.0
-  },
-  "ollama": {
-    "think": "off"
-  },
-  "agent": {
-    "enabled": false,
-    "max_steps": 8,
-    "timeout": 45
   }
 }

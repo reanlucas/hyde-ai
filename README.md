@@ -2,12 +2,15 @@
 
 # hyde-ai
 
-**An LLM chat sidebar for Hyprland.**
+**An agentic AI sidebar for Hyprland.**
 
 GTK4 with layer-shell, coloured by
 [HyDE](https://github.com/HyDE-Project/HyDE)'s wallbash.
 
-Claude · Gemini · ChatGPT · local Ollama — all streaming.
+The frontend is this panel; the backend is 100%
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) — its models,
+its 90+ tools, its agent loop, its memory and sessions — running as a
+separate process and streaming over JSON-RPC.
 
 </div>
 
@@ -18,9 +21,9 @@ Claude · Gemini · ChatGPT · local Ollama — all streaming.
 > edges, the API changes without notice and there are untested paths. If you
 > try it, expect breakage — and don't rely on it for anything that matters.
 >
-> **Agent mode** has only been tested with `qwen3.5:9b`. Any other model is
-> unknown ground: it runs commands on your machine, and a model that uses the
-> tools differently may behave in ways I have not seen.
+> **Every turn is agentic**: Hermes can read files, run commands and use the
+> web to answer. Anything that changes the system asks for your permission
+> inline, but the permission gate is Hermes's — review what you approve.
 
 ---
 
@@ -82,22 +85,33 @@ cd hyde-ai
 The installer resolves the dependencies, copies the files, renders the theme
 colours and runs a diagnostic at the end. It is idempotent.
 
-### 3. Configure the providers
+### 3. Point it at Hermes
+
+The installer clones nothing: it expects a
+[hermes-agent](https://github.com/NousResearch/hermes-agent) checkout
+(default `~/Projetos/hermes-agent`, override with `HYDE_AI_HERMES_DIR`) and
+builds its venv with [uv](https://github.com/astral-sh/uv) — the system
+Python cannot run Hermes (it needs `>=3.11,<3.14`), so uv fetches a managed
+3.11 into `hermes-agent/.venv`.
 
 ```bash
-hyde-ai --setup
+hyde-ai --setup      # confirms the paths and pings the real gateway
+hyde-ai --doctor     # full report, including a live gateway check
 ```
 
-Asks for the API keys and the default model. The config is written to
-`~/.config/hyde-ai/config.json` with mode `0600`.
+API keys and the default model belong to Hermes now: set keys from the panel
+with `/key <provider> <value>` (they land in `~/.hermes/.env`) and the model
+with `/model`, or edit `~/.hermes/config.yaml`.
 
-**Ollama needs no key.** If the service is already running, its models show up
-on their own:
+**Local models via Ollama** work through Hermes's `custom` provider:
 
-```bash
-sudo pacman -S ollama-rocm      # AMD; use "ollama" for CPU/NVIDIA
-sudo systemctl enable --now ollama
-ollama pull qwen3.5:9b
+```yaml
+# ~/.hermes/config.yaml
+model:
+  default: "qwen3.5:9b"
+  provider: "ollama"
+  base_url: "http://localhost:11434/v1"
+  api_key: "ollama"
 ```
 
 ### 4. Open it
@@ -131,15 +145,17 @@ write.
 
 | Command | What it does |
 |---|---|
-| `/clear` | new conversation |
-| `/history` | list the saved conversations |
-| `/provider` `/model` | switch provider or model |
-| `/key <provider> <value>` | store an API key |
+| `/clear` | new conversation (a fresh Hermes session) |
+| `/historico` | conversations saved in Hermes · `/historico abrir <n\|id>` resumes one |
+| `/provider` `/model` | switch provider or model (Hermes inventory) |
+| `/key <provider> <value>` | store an API key in Hermes (`~/.hermes/.env`) |
 | `/speed` | average tokens/s per model |
-| `/refresh` | re-probe providers and models |
-| `/think auto\|on\|off` | reasoning draft |
-| `/agent on\|off` | let the model run commands here |
+| `/refresh` | re-probe the Hermes inventory |
+| `/think on\|off\|low\|medium\|high` | show the reasoning draft / effort |
 | `/side left\|right` · `/width 35` | panel geometry |
+
+Any other `/command` is forwarded to Hermes itself — `/memoria`, `/skills`
+and the rest of its catalogue autocomplete in the palette, tagged `hermes`.
 
 From the shell, `hyde-ai --ask "your question"` opens the panel and sends the
 question straight through — handy on a keybind or from a script.
@@ -169,85 +185,65 @@ The metrics are stored with the message, so they travel with the conversation.
 
 ## Reasoning models
 
-Qwen3, the o-series and Claude with *thinking* produce a draft before the
-answer.
+Models with *thinking* produce a draft before the answer. The button next to
+send shows or hides that draft in the conversation; `/think low|medium|high`
+sets the reasoning effort Hermes asks for (it applies from the next
+conversation on).
 
-**Off by default** — the draft multiplies response time by five or more, and
-rarely earns that in a sidebar. The button next to send turns it on per
-question; `/think` takes `auto`, `on`, `off`, `low`, `medium` and `high`.
-
-With it on, the header pulses **Pensando…** while the model works and becomes
-**Pensou por 36s** when it finishes — clickable, with the whole draft inside.
-
-Without this the bubble would sit empty for the entire reasoning phase, and
-empty forever if the draft ate all of `max_tokens`. When that happens, the
-panel says what went wrong instead of leaving the message blank.
+With the draft visible, the header pulses **Pensando…** while the model works
+and becomes **Pensou por 36s** when it finishes — clickable, with the whole
+draft inside.
 
 ---
 
-## Agent mode
+## The agent is Hermes
 
-With it on, the model can **run commands on this machine** to answer. It chains
-calls: looks at the state, decides the next step, and only then replies.
+Every turn goes through [Hermes
+Agent](https://github.com/NousResearch/hermes-agent)'s own loop: terminal,
+files, web search, browser, memory, skills, subagents — 90+ tools, executed
+server-side in its process. The panel renders what happens as it happens:
 
 ```
 You: why did the metrics collector stop?
 
-  ▸ shell   systemctl --user status hyde-widgets-collector      ok
-  ▸ shell   journalctl --user -u hyde-widgets-collector -n 30   ok
+  ▸ terminal   systemctl --user status hyde-widgets-collector      ok
+  ▸ terminal   journalctl --user -u hyde-widgets-collector -n 30   ok
 
 The GPU path moved from card1 to card2 after the last boot,
 so the collector can no longer find the sensor.
 ```
 
-**Off by default.** The terminal button next to send turns it on, or
-`/agent on`. Ollama only, with models that advertise `tools` — `ollama show`
-tells you which.
-
-> [!CAUTION]
-> Tested **only with `qwen3.5:9b`**. Other models advertise `tools` and should
-> work, but none were verified. The permission gate applies to all of them — it
-> inspects the command, not the model — but how each one chains calls, whether
-> it insists after a refusal, and how it reads output is behaviour I have not
-> seen. Start with read-only requests.
-
-### What it can run on its own
-
-Read-only commands run immediately. Anything that changes the system shows the
-exact command and waits for **Permitir** or **Negar**:
+When Hermes wants to run something its own safety layer classifies as
+dangerous, the panel shows an approval card with the exact command and the
+choices Hermes offers — **Permitir**, **Sempre nesta sessão**, **Sempre**,
+**Negar**:
 
 ```
-  ▸ shell   sed -i 's/card1/card2/' collector
-            [ Negar ]  [ Permitir ]
+  ⚠ aprovacao   sed -i 's/card1/card2/' collector
+                [ Negar ] [ Sempre ] [ Sempre nesta sessão ] [ Permitir ]
 ```
 
-The classification is a closed allowlist of read-only commands, applied to
-**every segment** of the line — `ls | sh` does not pass, because `sh` is not on
-the list. Redirection (`>`), command substitution (`` ` ``, `$(...)`), `sudo`,
-`python3 -c` and writing subcommands (`git push`, `systemctl restart`,
-`pacman -S`) all fall through to confirmation. So does an unknown command: the
-rule errs towards asking, on purpose.
+The agent stays parked until you click. A refusal is not a dead end — Hermes
+receives it and explains or proposes another way. Mid-turn questions from the
+agent (clarify) appear the same way, with an inline answer field. `sudo` and
+secret prompts are auto-denied — the sidebar has no password UI, on purpose.
 
-A refusal is not a dead end — the model receives it as the tool result and
-explains what it would have done instead of retrying.
+The protocol layer has its own test harness, no GTK required:
 
 ```bash
-python3 tests/test_agente.py     # 66 commands against the safety gate
+python3 tests/test_hermes_client.py   # transport: 18 cases against a fake gateway
+python3 tests/test_registry.py        # adapter: 21 cases, full event table
 ```
-
-| Config | |
-|---|---|
-| `agent.enabled` | on or off (default: off) |
-| `agent.max_steps` | ceiling on round trips per question (default: 8) |
-| `agent.timeout` | seconds per command (default: 45) |
 
 ---
 
 ## History
 
-Conversations saved and grouped by provider, with title, date and message
-count. The header button lists and restores them; it keeps 40. Each row has a
-delete button.
+`/clear` starts a fresh Hermes session; the transcript of every conversation
+lives in Hermes's SQLite (`~/.hermes/state.db`). `/historico` lists them and
+`/historico abrir <n>` resumes one — the next message continues that session,
+with Hermes's full context. The header button keeps the local display cache
+(40 conversations) for instant restore.
 
 ---
 
@@ -269,7 +265,6 @@ delimiter closes — it appears whole, in one go.
 ```bash
 python3 tests/test_bateria.py     # 43 cases: maths, Python, JS, shell
 python3 tests/test_parser.py      # 21 cases: regressions and streaming
-python3 tests/test_agente.py      # 66 cases: the agent safety gate
 ```
 
 Every case came from a reply that showed up wrong on screen.
@@ -322,7 +317,7 @@ inside backticks.
 ## Dependencies
 
 `gtk4-layer-shell` `python-gobject` `libadwaita` `gtksourceview5`
-`python-matplotlib` `librsvg` `python-markdown-it` `python-mdit_py_plugins`
+`python-matplotlib` `librsvg` `python-markdown-it-py` `python-mdit_py_plugins`
 `python-pylatexenc` — all in the official Arch repositories.
 
 ---

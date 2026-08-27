@@ -27,7 +27,6 @@ The contract the Python package must honour is written out in
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import os
 import re
@@ -90,50 +89,127 @@ ENTRY_CANDIDATES = (
     ("app.py", lambda py, lib, path: [py, path]),
 )
 
-# Providers, mirroring providers.py. `env_vars` is in the same precedence
-# order the provider layer uses: config.json first, then these in order.
-PROVIDERS = (
-    {
-        "id": "anthropic",
-        "name": "Claude",
-        "env_vars": ("ANTHROPIC_API_KEY",),
-        "key_url": "https://console.anthropic.com/settings/keys",
-        "models": ("claude-opus-5", "claude-sonnet-5",
-                   "claude-fable-5", "claude-haiku-4-5"),
-        "default_model": "claude-opus-5",
-    },
-    {
-        "id": "gemini",
-        "name": "Gemini",
-        "env_vars": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
-        "key_url": "https://aistudio.google.com/apikey",
-        "models": ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
-                   "gemini-3.5-flash-lite", "gemini-3.1-pro-preview",
-                   "gemini-2.5-pro", "gemini-2.5-flash"),
-        "default_model": "gemini-3.7-flash",
-    },
-    {
-        "id": "openai",
-        "name": "ChatGPT",
-        "env_vars": ("OPENAI_API_KEY",),
-        "key_url": "https://platform.openai.com/api-keys",
-        "models": ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
-                   "gpt-5.5", "gpt-5.4"),
-        "default_model": "gpt-5.6-sol",
-    },
-    {
-        "id": "ollama",
-        "name": "Ollama",
-        "env_vars": ("OLLAMA_API_KEY",),   # only needed for Ollama Cloud
-        "key_url": "https://ollama.com/settings/keys",
-        "models": (),                       # discovered from the daemon
-        "default_model": "",
-    },
-)
+# O backend e o Hermes Agent num processo separado (venv proprio -- o Python
+# do sistema nao roda o Hermes, que exige >=3.11,<3.14). Estes defaults valem
+# quando o config ainda nao aponta os caminhos.
+DEFAULT_HERMES_DIR = os.path.expanduser(
+    os.environ.get("HYDE_AI_HERMES_DIR", "~/Projetos/hermes-agent"))
+HERMES_HOME = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
 
-PROVIDER_BY_ID = {p["id"]: p for p in PROVIDERS}
 
-DEFAULT_OLLAMA_URL = "http://localhost:11434"
+def hermes_dir(config: dict) -> str:
+    valor = (cfg_get(config, "hermes.path", "") or "").strip()
+    return os.path.expanduser(valor) if valor else DEFAULT_HERMES_DIR
+
+
+def hermes_python(config: dict) -> str:
+    valor = (cfg_get(config, "hermes.python", "") or "").strip()
+    if valor:
+        return os.path.expanduser(valor)
+    return os.path.join(hermes_dir(config), ".venv", "bin", "python")
+
+
+def check_hermes_gateway(python: str, cwd: str, timeout: float = 20.0):
+    """Sobe o gateway de verdade, espera o gateway.ready, faz um ping.
+
+    Devolve (ok, detalhe). Autossuficiente e stdlib-only, como o resto do
+    launcher: o mesmo caminho que o painel usa, sem importar o app.
+    """
+    if not os.path.exists(python):
+        return False, "python do venv nao existe: %s" % python
+    try:
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+        proc = subprocess.Popen(
+            [python, "-m", "tui_gateway.entry"],
+            cwd=cwd or None,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, bufsize=1, env=env,
+            start_new_session=True)
+    except OSError as exc:
+        return False, "spawn falhou: %s" % exc
+
+    import threading as _th
+    from collections import deque as _deque
+
+    resposta = {}
+    erro_rpc = {}
+    pronto = _th.Event()
+    pong = _th.Event()
+    stderr_fim = _deque(maxlen=40)
+
+    def leitor():
+        try:
+            for linha in proc.stdout:
+                try:
+                    frame = json.loads(linha.strip() or "{}")
+                except ValueError:
+                    continue
+                params = frame.get("params") or {}
+                if params.get("type") == "gateway.ready":
+                    pronto.set()
+                if frame.get("id") == "doctor-1":
+                    resposta.update(frame.get("result") or {})
+                    erro_rpc.update(frame.get("error") or {})
+                    pong.set()
+                    return
+        except (OSError, ValueError):
+            pass
+
+    def leitor_stderr():
+        # Sem drenar, um startup verboso enche o pipe (~64KB) e o gateway
+        # trava no write antes de emitir o gateway.ready.
+        try:
+            for linha in proc.stderr:
+                stderr_fim.append(linha.rstrip())
+        except (OSError, ValueError):
+            pass
+
+    _th.Thread(target=leitor, daemon=True).start()
+    _th.Thread(target=leitor_stderr, daemon=True).start()
+
+    def esperar(evento, prazo):
+        """Espera o evento, mas desiste na hora se o processo morrer."""
+        fim = time.monotonic() + prazo
+        while time.monotonic() < fim:
+            if evento.wait(0.25):
+                return True
+            if proc.poll() is not None:
+                return evento.is_set()
+        return evento.is_set()
+
+    def rabo_stderr():
+        return " ".join(stderr_fim)[-160:].strip()
+
+    try:
+        if not esperar(pronto, timeout):
+            proc.kill()
+            if proc.poll() is not None and not pronto.is_set():
+                return False, ("gateway morreu no spawn (exit %s) %s"
+                               % (proc.returncode, rabo_stderr())).strip()
+            return False, "gateway.ready nao veio em %.0fs %s" % (
+                timeout, rabo_stderr())
+        try:
+            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": "doctor-1",
+                                         "method": "ping"}) + "\n")
+            proc.stdin.flush()
+        except OSError as exc:
+            return False, "gateway morreu antes do ping: %s" % exc
+        if not esperar(pong, 10.0):
+            return False, ("ping sem resposta %s" % rabo_stderr()).strip()
+        if erro_rpc:
+            return False, "ping falhou: %s" % (erro_rpc.get("message")
+                                               or erro_rpc)
+        if not resposta.get("pong"):
+            return False, "ping respondeu sem pong: %r" % (resposta,)
+        return True, "gateway respondeu"
+    finally:
+        try:
+            proc.stdin.close()
+            proc.wait(3.0)
+        except (OSError, subprocess.TimeoutExpired):
+            proc.kill()
+
 
 
 # --------------------------------------------------------------------------- #
@@ -261,10 +337,9 @@ def atomic_write(path: str, data: str, mode: int = 0o600) -> None:
 # setting the sidebar wrote and can never introduce a key the sidebar does not
 # understand.
 #
-# API keys are plain strings. An empty string means "not set here", and the
-# provider then falls back to its environment variable. There is no `env:` or
-# `keyring:` indirection -- the provider layer does not implement one, and
-# writing such a value would be read back as a literal (broken) key.
+# Chaves de API nao moram mais aqui: elas sao do Hermes (~/.hermes/.env).
+# Este arquivo guarda geometria do painel e os caminhos do backend
+# (hermes.python / hermes.path).
 
 def read_config() -> dict:
     """Return config.json exactly as it is on disk ({} if absent/unreadable)."""
@@ -305,57 +380,9 @@ def cfg_set(config: dict, dotted: str, value) -> None:
 
 
 def write_config(config: dict) -> None:
-    """Persist config.json at mode 0600 -- it can hold API keys."""
+    """Persist config.json at mode 0600 -- copias antigas podiam ter chaves."""
     atomic_write(CONFIG_FILE, json.dumps(config, indent=2, ensure_ascii=False) + "\n",
                  0o600)
-
-
-def stored_key(config: dict, provider_id: str) -> str:
-    value = cfg_get(config, "api_keys.%s" % provider_id, "")
-    return value.strip() if isinstance(value, str) else ""
-
-
-def env_key(provider: dict) -> "tuple[str, str]":
-    """Return (variable_name, value) for the first env var that is set."""
-    for var in provider["env_vars"]:
-        value = os.environ.get(var, "").strip()
-        if value:
-            return var, value
-    return "", ""
-
-
-def describe_key(config: dict, provider: dict) -> str:
-    """Human description of a provider's credential. Never prints the secret."""
-    value = stored_key(config, provider["id"])
-    if value:
-        return green("set in config.json (%d chars, ends %s)"
-                     % (len(value), value[-4:] if len(value) >= 4 else "****"))
-    var, _ = env_key(provider)
-    if var:
-        return green("from $%s" % var)
-    if provider["id"] == "ollama":
-        return dim("none needed for a local daemon")
-    return dim("not set")
-
-
-def provider_usable(config: dict, provider: dict) -> bool:
-    if provider["id"] == "ollama":
-        # Reachable but with nothing pulled is not usable for a chat.
-        return bool(detect_ollama_models(cfg_get(config, "ollama.base_url",
-                                                 DEFAULT_OLLAMA_URL)))
-    return bool(stored_key(config, provider["id"]) or env_key(provider)[1])
-
-
-def detect_ollama_models(base_url: str):
-    """Locally pulled Ollama models, or None if the daemon is unreachable."""
-    url = (base_url or DEFAULT_OLLAMA_URL).rstrip("/")
-    try:
-        import urllib.request
-        with urllib.request.urlopen(url + "/api/tags", timeout=1.5) as response:
-            payload = json.loads(response.read().decode("utf-8", "replace"))
-        return [m.get("name", "") for m in payload.get("models", []) if m.get("name")]
-    except Exception:
-        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -893,45 +920,64 @@ def cmd_doctor(args) -> int:
         mode = os.stat(CONFIG_FILE).st_mode & 0o777
         if mode & 0o077:
             print("  [%s] %-24s %s" % (yellow(" warn "), "config permissions",
-                                       "mode %o -- it can hold API keys" % mode))
+                                       "mode %o -- old copies may still hold "
+                                       "API keys" % mode))
             print("        %s" % dim("fix with:  chmod 600 %s" % CONFIG_FILE))
             warnings += 1
 
     print()
-    print(bold("providers"))
+    print(bold("hermes (backend)"))
     config = read_config()
-    for provider in PROVIDERS:
-        if provider["id"] == "ollama":
-            base_url = cfg_get(config, "ollama.base_url", DEFAULT_OLLAMA_URL)
-            models = detect_ollama_models(base_url)
-            if models is None:
-                print("  [%s] %-24s %s" % (dim("  --  "), "Ollama (local)",
-                                           dim("not reachable at %s" % base_url)))
-            elif models:
-                print("  [%s] %-24s %s" % (green("  ok  "), "Ollama (local)",
-                                           "%d model(s): %s"
-                                           % (len(models), ", ".join(models[:4]))))
-            else:
-                print("  [%s] %-24s %s" % (yellow(" warn "), "Ollama (local)",
-                                           "running, but no models pulled"))
-                print("        %s" % dim("try:  ollama pull gemma4:12b"))
-                warnings += 1
-            continue
-        usable = provider_usable(config, provider)
-        mark = green("  ok  ") if usable else dim("  --  ")
-        print("  [%s] %-24s %s" % (mark, provider["name"],
-                                   describe_key(config, provider)))
+    hdir = hermes_dir(config)
+    hpy = hermes_python(config)
 
-    if not any(provider_usable(config, p) for p in PROVIDERS):
-        print("        %s" % yellow("no provider is usable yet -- run `hyde-ai --setup`"))
-        warnings += 1
+    if os.path.isfile(os.path.join(hdir, "pyproject.toml")):
+        print("  [%s] %-24s %s" % (green("  ok  "), "checkout", hdir))
+    else:
+        print("  [%s] %-24s %s" % (red(" FAIL "), "checkout",
+                                   hdir + " (sem pyproject.toml)"))
+        print("        %s" % dim("clone o hermes-agent ali, ou aponte "
+                                 "hermes.path no config"))
+        failures += 1
 
-    selected = (cfg_get(config, "provider", "") or "").strip()
-    model = (cfg_get(config, "models.%s" % selected, "") or "").strip() if selected else ""
-    print("  %-31s %s" % (dim("selected provider"),
-                          selected or dim("(none yet -- run `hyde-ai --setup`)")))
-    print("  %-31s %s" % (dim("selected model"),
-                          model or dim("(provider default)")))
+    if os.path.exists(hpy):
+        versao = ""
+        try:
+            versao = subprocess.run([hpy, "--version"], capture_output=True,
+                                    text=True, timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        print("  [%s] %-24s %s" % (green("  ok  "), "venv python",
+                                   "%s (%s)" % (hpy, versao or "?")))
+        if not (cfg_get(config, "hermes.python", "") or "").strip():
+            print("  [%s] %-24s %s" % (yellow(" warn "), "hermes.python",
+                                       "vazio no config (usando o fallback "
+                                       "<path>/.venv)"))
+            print("        %s" % dim("grave com:  hyde-ai --setup"))
+            warnings += 1
+        ok, detalhe = check_hermes_gateway(hpy, hdir)
+        if ok:
+            print("  [%s] %-24s %s" % (green("  ok  "), "gateway", detalhe))
+        else:
+            print("  [%s] %-24s %s" % (red(" FAIL "), "gateway", detalhe))
+            print("        %s" % dim("rode `uv sync` em %s e tente de novo"
+                                     % hdir))
+            failures += 1
+    else:
+        print("  [%s] %-24s %s" % (red(" FAIL "), "venv python",
+                                   hpy + " (nao existe)"))
+        print("        %s" % dim("crie com:  cd %s && uv sync" % hdir))
+        failures += 1
+
+    for rotulo, caminho in (("hermes config", os.path.join(HERMES_HOME,
+                                                           "config.yaml")),
+                            ("hermes state", os.path.join(HERMES_HOME,
+                                                          "state.db"))):
+        if os.path.exists(caminho):
+            print("  [%s] %-24s %s" % (green("  ok  "), rotulo, caminho))
+        else:
+            print("  [%s] %-24s %s" % (dim("  --  "), rotulo,
+                                       caminho + " (primeiro uso cria)"))
 
     print()
     print(bold("desktop integration"))
@@ -1002,14 +1048,6 @@ def ask_yes(prompt: str, default: bool = True) -> bool:
         print("  please answer y or n")
 
 
-def ask_secret(prompt: str) -> str:
-    try:
-        return getpass.getpass("%s: " % prompt).strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        raise SystemExit(130)
-
-
 def cmd_setup(args) -> int:
     if not _isatty():
         die("--setup needs an interactive terminal.",
@@ -1020,99 +1058,59 @@ def cmd_setup(args) -> int:
     existed = os.path.exists(CONFIG_FILE)
 
     print(bold("hyde-ai setup"))
-    print("Writing %s (mode 0600)." % CONFIG_FILE)
-    print("Only the settings you change are written; everything else is left alone.")
-    print()
-    print(dim("A key can live in one of two places:"))
-    print(dim("  * here, in config.json  -- paste it below"))
-    print(dim("  * in the environment    -- leave blank and export the variable"))
-    print(dim("The sidebar checks config.json first, then the environment."))
+    print("O backend e o Hermes Agent, num venv proprio. Este assistente")
+    print("aponta o painel para ele; as chaves de API moram no Hermes")
+    print("(%s/.env), nao mais aqui." % HERMES_HOME)
     print()
 
-    # ---- credentials ------------------------------------------------------
-    for provider in PROVIDERS:
-        if provider["id"] == "ollama":
-            continue           # a local daemon needs no key; handled below
-        print(bold(provider["name"]))
-        print("  current:  %s" % describe_key(config, provider))
-        print("  env var:  %s" % dim(" or ".join(provider["env_vars"])))
-        print("  get one:  %s" % dim(provider["key_url"]))
-        secret = ask_secret("  paste key (Enter = leave as is, '-' = clear)")
-        if secret == "-":
-            cfg_set(config, "api_keys.%s" % provider["id"], "")
-            print("  " + yellow("cleared from config.json"))
-        elif secret:
-            cfg_set(config, "api_keys.%s" % provider["id"], secret)
-            print("  " + green("stored in config.json"))
-        else:
-            var, _ = env_key(provider)
-            if var:
-                print("  " + dim("unchanged; $%s will be used" % var))
-            elif stored_key(config, provider["id"]):
-                print("  " + dim("unchanged"))
+    # ---- caminhos do Hermes ----------------------------------------------
+    print(bold("Hermes"))
+    hdir = ask("  checkout do hermes-agent", hermes_dir(config))
+    hdir = os.path.expanduser(hdir)
+    if not os.path.isfile(os.path.join(hdir, "pyproject.toml")):
+        print("  " + yellow("sem pyproject.toml em %s" % hdir))
+        print("  " + dim("clone com: git clone "
+                         "https://github.com/NousResearch/hermes-agent " + hdir))
+    hpy_padrao = os.path.join(hdir, ".venv", "bin", "python")
+    hpy_atual = (cfg_get(config, "hermes.python", "") or "").strip()
+    hpy = ask("  python que roda o Hermes", hpy_atual or hpy_padrao)
+    hpy = os.path.expanduser(hpy)
+    if not os.path.exists(hpy):
+        print("  " + yellow("esse python ainda nao existe (%s)" % hpy))
+        # so oferece o uv sync quando ele resolveria: checkout presente e
+        # o python pedido e exatamente o venv que o uv criaria
+        if os.path.isdir(hdir) and hpy == hpy_padrao:
+            if shutil.which("uv"):
+                if ask_yes("  rodar `uv sync` agora? (baixa o Python 3.11 e "
+                           "as dependencias)", default=True):
+                    codigo = subprocess.call(["uv", "sync"], cwd=hdir)
+                    if codigo != 0:
+                        print("  " + red("uv sync falhou (%d)" % codigo))
             else:
-                print("  " + dim("skipped; export %s to use it later"
-                                 % provider["env_vars"][0]))
-        print()
-
-    # ---- Ollama -----------------------------------------------------------
-    print(bold("Ollama (local models)"))
-    base_url = ask("  base url", cfg_get(config, "ollama.base_url", DEFAULT_OLLAMA_URL))
-    cfg_set(config, "ollama.base_url", base_url)
-    ollama_models = detect_ollama_models(base_url)
-    if ollama_models is None:
-        print("  " + yellow("not reachable at %s" % base_url))
-        print("  " + dim("that is fine -- the sidebar re-checks at runtime"))
-        ollama_models = []
-    elif ollama_models:
-        print("  " + green("found: %s" % ", ".join(ollama_models)))
-    else:
-        print("  " + yellow("running, but no models are pulled"))
-        print("  " + dim("try:  ollama pull gemma4:12b"))
+                print("  " + dim("instale o uv (sudo pacman -S uv) e rode "
+                                 "`uv sync` em %s" % hdir))
+    cfg_set(config, "hermes.path", hdir)
+    cfg_set(config, "hermes.python", hpy)
+    print("  hermes.path:   " + green(hdir))
+    print("  hermes.python: " + green(hpy))
     print()
 
-    # ---- default provider and model --------------------------------------
-    print(bold("Which provider should the sidebar open with?"))
-    choices = []
-    for provider in PROVIDERS:
-        usable = (bool(ollama_models) if provider["id"] == "ollama"
-                  else provider_usable(config, provider))
-        choices.append((provider, usable))
-    current_provider = (cfg_get(config, "provider", "") or "anthropic")
-    for index, (provider, usable) in enumerate(choices, 1):
-        marker = " *" if provider["id"] == current_provider else "  "
-        state = green("ready") if usable else dim("no key / not running")
-        print("  %s%d) %-12s %s" % (marker, index, provider["name"], state))
-    raw = ask("  choice", str(next((i for i, (p, _) in enumerate(choices, 1)
-                                    if p["id"] == current_provider), 1)))
-    if raw.isdigit() and 1 <= int(raw) <= len(choices):
-        chosen = choices[int(raw) - 1][0]
-    else:
-        chosen = PROVIDER_BY_ID.get(raw.strip().lower(), choices[0][0])
-    cfg_set(config, "provider", chosen["id"])
-    print("  provider: " + green(chosen["id"]))
-    print()
+    # ---- teste real -------------------------------------------------------
+    if os.path.exists(hpy):
+        print(bold("Teste do gateway"))
+        ok, detalhe = check_hermes_gateway(hpy, hdir)
+        print("  " + (green(detalhe) if ok else red(detalhe)))
+        print()
 
-    models = list(ollama_models) if chosen["id"] == "ollama" else list(chosen["models"])
-    if models:
-        print(bold("Default model for %s" % chosen["name"]))
-        _mkey = "models.%s" % chosen["id"]
-        current_model = (cfg_get(config, _mkey, "") or "").strip()
-        if current_model not in models:
-            current_model = chosen["default_model"] or models[0]
-        for index, model in enumerate(models, 1):
-            marker = " *" if model == current_model else "  "
-            print("  %s%2d) %s" % (marker, index, model))
-        raw = ask("  choice (number, or type a model id)", current_model)
-        if raw.isdigit() and 1 <= int(raw) <= len(models):
-            cfg_set(config, _mkey, models[int(raw) - 1])
-        elif raw:
-            cfg_set(config, _mkey, raw)
-        print("  model: " + green(cfg_get(config, _mkey, "")))
-        print()
-    elif chosen["id"] == "ollama":
-        print(yellow("  no local models to choose from yet; pull one and rerun --setup"))
-        print()
+    # ---- chaves -----------------------------------------------------------
+    print(bold("Chaves de API"))
+    print("  As chaves ficam com o Hermes:")
+    print("  " + dim("* no painel:  /key <provedor> <valor>  (ex.: /key "
+                     "openrouter sk-...)"))
+    print("  " + dim("* ou direto em %s/.env" % HERMES_HOME))
+    print("  " + dim("* modelo padrao: `model:` em %s/config.yaml"
+                     % HERMES_HOME))
+    print()
 
     if not existed:
         config.setdefault("version", 1)
@@ -1155,12 +1153,12 @@ def cmd_setup(args) -> int:
 EPILOG = """\
 examples:
   hyde-ai                 toggle the sidebar (this is what the keybind runs)
-  hyde-ai --setup         interactively record API keys and the default model
+  hyde-ai --setup         point the panel at the Hermes backend and test it
   hyde-ai --doctor        check every dependency and integration point
   hyde-ai --log -f        follow the sidebar's output
 
 files:
-  ~/.config/hyde-ai/config.json          configuration and API keys (mode 0600)
+  ~/.config/hyde-ai/config.json          panel config + hermes paths (0600)
   ~/.local/lib/hyde-ai/                  the Python package
   ~/.local/state/hyde-ai/                chat history and log
   ~/.cache/hyde/wallbash/hyde-ai.css     generated theme, follows the wallpaper

@@ -3,9 +3,9 @@
 """
 hyde-ai :: application entrypoint.
 
-Wires together ``config.py`` (settings + API keys), ``providers.py`` (streaming
-chat backends) and ``sidebar.py`` (the GTK4 layer-shell UI), and implements the
-single-instance toggle semantics.
+Wires together ``config.py`` (settings), ``hermes_registry.py`` (the Hermes
+gateway backend) and ``sidebar.py`` (the GTK4 layer-shell UI), and implements
+the single-instance toggle semantics.
 
 Invocation
 ----------
@@ -21,9 +21,9 @@ The same verbs are exported as GActions, so they also work over D-Bus:
 
     gapplication action dev.hyde.HydeAi toggle
 
-Everything here is defensive about its collaborators: if ``config.py`` or
-``providers.py`` is missing or exposes a different shape, the app still starts
-and says so in the UI rather than dying with a traceback.
+Everything here is defensive about its collaborators: if ``config.py`` or the
+Hermes backend is missing or unusable, the app still starts and says so in the
+UI rather than dying with a traceback.
 """
 
 # --------------------------------------------------------------------------
@@ -180,8 +180,8 @@ def _deep_merge(base, override):
 class _JsonConfig(object):
     """Dotted-key JSON store used when ``config.py`` is unavailable.
 
-    It deliberately mirrors ``config.Config``'s provider-facing surface
-    (``api_key`` / ``model_for`` / ``timeouts``) so ``providers.py`` accepts it.
+    It mirrors ``config.Config``'s surface (``get`` / ``set`` / ``save``)
+    so the Hermes backend and the sidebar accept it unchanged.
     """
 
     def __init__(self, path=CONFIG_PATH):
@@ -398,334 +398,9 @@ def build_config():
 # Providers
 # ==========================================================================
 
-class ProviderInfo(object):
-    """Fallback provider descriptor (used only when providers.py is exotic)."""
-
-    __slots__ = ("id", "name", "available", "hint", "models")
-
-    def __init__(self, pid, name, available=True, hint="", models=None):
-        self.id = pid
-        self.name = name or pid
-        self.available = bool(available)
-        self.hint = hint or ""
-        self.models = models or []
-
-    def __repr__(self):  # pragma: no cover
-        return "<ProviderInfo %s available=%s>" % (self.id, self.available)
-
-
-class ModelInfo(object):
-    __slots__ = ("id", "name", "description")
-
-    def __init__(self, mid, name=None, description=""):
-        self.id = mid
-        self.name = name or mid
-        self.description = description or ""
-
-    def __repr__(self):  # pragma: no cover
-        return "<ModelInfo %s>" % (self.id,)
-
-
-def _field(obj, *names, **kw):
-    default = kw.get("default")
-    for name in names:
-        if isinstance(obj, dict):
-            if name in obj:
-                return obj[name]
-        else:
-            value = getattr(obj, name, None)
-            if value is not None:
-                return value
-    return default
-
-
-def _is_provider_shaped(obj):
-    """True when the object is already what the sidebar expects."""
-    if isinstance(obj, dict):
-        return False
-    return (
-        getattr(obj, "id", None) is not None
-        and getattr(obj, "name", None) is not None
-        and hasattr(obj, "available")
-        and not callable(getattr(obj, "available"))
-        and hasattr(obj, "hint")
-    )
-
-
-def _is_model_shaped(obj):
-    if isinstance(obj, dict) or isinstance(obj, str):
-        return False
-    return getattr(obj, "id", None) is not None and getattr(obj, "name", None) is not None
-
-
-def _as_model(raw):
-    if _is_model_shaped(raw):
-        return raw
-    if isinstance(raw, str):
-        return ModelInfo(raw)
-    mid = _field(raw, "id", "model", "name", default=None)
-    if not mid:
-        return None
-    return ModelInfo(
-        str(mid),
-        str(_field(raw, "name", "label", "title", default=mid)),
-        str(_field(raw, "description", "desc", default="") or ""),
-    )
-
-
-class _TextEvent(object):
-    """Evento minimo, para registries que so devolvem texto."""
-
-    __slots__ = ("kind", "text", "data")
-
-    def __init__(self, text):
-        self.kind = "text"
-        self.text = text
-        self.data = {}
-
-
-def _as_text_events(deltas):
-    for delta in deltas:
-        if delta:
-            yield _TextEvent(delta)
-
-
-class RegistryProxy(object):
-    """Normalises ``providers.py`` onto the interface the sidebar consumes."""
-
-    def __init__(self, inner, config, module=None):
-        self._inner = inner
-        self._config = config
-        self._module = module
-
-    # -- listing ---------------------------------------------------------
-    def list_providers(self):
-        raw_list = None
-        lister = getattr(self._inner, "list_providers", None)
-        if callable(lister):
-            raw_list = lister()
-        if raw_list is None:
-            candidate = getattr(self._inner, "providers", None)
-            raw_list = candidate() if callable(candidate) else candidate
-        if raw_list is None:
-            candidate = getattr(self._inner, "all_providers", None)
-            if callable(candidate):
-                try:
-                    raw_list = candidate(self._config)
-                except TypeError:
-                    raw_list = candidate()
-        if raw_list is None:
-            raw_list = getattr(self._inner, "PROVIDERS", None)
-        if raw_list is None:
-            return []
-
-        if isinstance(raw_list, dict):
-            pairs = list(raw_list.items())
-        else:
-            pairs = [(None, value) for value in raw_list]
-
-        result = []
-        for pid, value in pairs:
-            provider = self._as_provider(pid, value)
-            if provider is not None:
-                result.append(provider)
-        return result
-
-    def _as_provider(self, pid, raw):
-        if _is_provider_shaped(raw):
-            return raw
-        rid = pid or _field(raw, "id", "provider_id", "key", "name", default=None)
-        if not rid:
-            return None
-        rid = str(rid)
-        name = str(_field(raw, "name", "label", "title", default=rid))
-
-        models = []
-        for item in (_field(raw, "models", "catalogue", "model_list", default=None) or []):
-            model = _as_model(item)
-            if model is not None:
-                models.append(model)
-
-        # Prefere a versao que NAO toca a rede. Chamar available() aqui
-        # disparava probe() sincrono na thread da interface a cada envio,
-        # segurando a mensagem do usuario ate a sondagem terminar.
-        cached = getattr(raw, "available_cached", None)
-        if callable(cached):
-            try:
-                available = bool(cached())
-            except Exception:
-                available = None
-        else:
-            available = _field(raw, "available", "enabled", "is_available",
-                               default=None)
-            if callable(available):
-                try:
-                    available = bool(available())
-                except Exception:
-                    available = None
-
-        hint = ""
-        reason = _field(raw, "unavailable_reason", "hint", "reason", default=None)
-        if callable(reason):
-            try:
-                reason = reason()
-            except Exception:
-                reason = None
-        if isinstance(reason, str):
-            hint = reason
-
-        if available is None:
-            requires_key = _field(raw, "requires_key", "needs_key", default=True)
-            if requires_key:
-                available = bool(self.api_key(rid))
-                if not available and not hint:
-                    env = _field(raw, "env_var", "env", default=None)
-                    hint = ("no API key (export %s, or run /key %s <value>)" % (env, rid)
-                            if env else "no API key (run /key %s <value>)" % rid)
-            else:
-                available = True
-        return ProviderInfo(rid, name, available, hint, models)
-
-    def get_provider(self, pid):
-        for provider in self.list_providers():
-            if provider.id == pid:
-                return provider
-        return None
-
-    def models(self, pid):
-        lister = getattr(self._inner, "models", None)
-        if callable(lister):
-            try:
-                raw = lister(pid)
-            except Exception as exc:
-                _warn("providers.models failed: %r" % (exc,))
-                raw = None
-            if raw is not None:
-                out = []
-                for item in raw:
-                    model = _as_model(item)
-                    if model is not None:
-                        out.append(model)
-                return out
-        provider = self.get_provider(pid)
-        models = getattr(provider, "models", None) or [] if provider is not None else []
-        out = []
-        for item in models:
-            model = _as_model(item)
-            if model is not None:
-                out.append(model)
-        return out
-
-    def default_model(self, pid):
-        chooser = getattr(self._inner, "default_model", None)
-        if callable(chooser):
-            try:
-                return chooser(pid) or ""
-            except Exception:
-                return ""
-        return ""
-
-    def first_available(self):
-        chooser = getattr(self._inner, "first_available", None)
-        if callable(chooser):
-            try:
-                return chooser()
-            except Exception:
-                pass
-        providers = self.list_providers()
-        for provider in providers:
-            if provider.available:
-                return provider.id
-        return providers[0].id if providers else None
-
-    # -- keys ------------------------------------------------------------
-    def api_key(self, pid):
-        getter = getattr(self._config, "api_key", None)
-        if callable(getter):
-            try:
-                return getter(pid) or ""
-            except Exception:
-                pass
-        return ""
-
-    def set_api_key(self, pid, value):
-        setter = getattr(self._inner, "set_api_key", None)
-        if callable(setter):
-            setter(pid, value)          # ProviderError propagates to the UI
-            return
-        setter = getattr(self._config, "set_api_key", None)
-        if callable(setter):
-            setter(pid, value)
-            self._config.save()
-            return
-        raise RuntimeError("no writable config is available to store the key")
-
-    # -- discovery -------------------------------------------------------
-    def refresh_async(self, done_callback=None):
-        runner = getattr(self._inner, "refresh_async", None)
-        if callable(runner):
-            try:
-                return runner(done_callback)
-            except Exception as exc:
-                _warn("providers.refresh_async failed: %r" % (exc,))
-        refresh = getattr(self._inner, "refresh", None)
-        if not callable(refresh):
-            if done_callback is not None:
-                done_callback()
-            return None
-
-        def run():
-            try:
-                refresh()
-            except Exception as exc:
-                _warn("providers.refresh failed: %r" % (exc,))
-            if done_callback is not None:
-                done_callback()
-
-        thread = threading.Thread(target=run, name="hyde-ai-probe", daemon=True)
-        thread.start()
-        return thread
-
-    # -- streaming -------------------------------------------------------
-    def new_cancel(self):
-        """A cancel token the provider layer understands, if it defines one."""
-        module = self._module
-        token_cls = getattr(module, "CancelToken", None) if module is not None else None
-        if token_cls is None:
-            token_cls = getattr(self._inner, "CancelToken", None)
-        if token_cls is not None:
-            try:
-                return token_cls()
-            except Exception as exc:
-                _warn("CancelToken() failed: %r" % (exc,))
-        return threading.Event()
-
-    def stream(self, pid, model_id, messages, system, cancel):
-        streamer = getattr(self._inner, "stream", None)
-        if not callable(streamer):
-            streamer = getattr(self._inner, "stream_chat", None)
-        if not callable(streamer):
-            raise RuntimeError("providers.py exposes no stream()/stream_chat()")
-        return streamer(pid, model_id, messages, system, cancel)
-
-    def stream_events(self, pid, model_id, messages, system, cancel, tools=None):
-        """Deltas rotulados: text, thinking, usage, tool.
-
-        Um registry que so saiba texto puro continua funcionando -- os deltas
-        sao embrulhados como eventos de texto, e as ferramentas sao ignoradas.
-        """
-        events = getattr(self._inner, "stream_events", None)
-        if callable(events):
-            try:
-                return events(pid, model_id, messages, system, cancel, tools)
-            except TypeError:
-                # registry antigo, sem ferramentas: segue sem elas
-                return events(pid, model_id, messages, system, cancel)
-        return _as_text_events(self.stream(pid, model_id, messages, system, cancel))
-
 
 class EmptyRegistry(object):
-    """Stand-in used when providers.py is missing or unusable."""
+    """Stand-in used when the Hermes backend cannot be constructed."""
 
     def __init__(self, reason):
         self.reason = reason
@@ -767,39 +442,18 @@ class EmptyRegistry(object):
 
 
 def build_registry(config):
+    """O backend agora e 100% Hermes: gateway em processo separado.
+
+    A construcao nao spawna nada -- o gateway sobe no primeiro
+    ``refresh_async`` (chamado em do_startup), fora do main loop.
+    """
     try:
-        import providers as providers_mod
+        import hermes_registry
+        return hermes_registry.HermesRegistry.from_config(config)
     except Exception as exc:
-        reason = "providers.py is not available (%s)" % exc
+        reason = "backend Hermes indisponivel (%s)" % exc
         _warn(reason)
         return EmptyRegistry(reason)
-
-    inner = None
-    for attr, args in (
-        ("ProviderRegistry", (config,)), ("ProviderRegistry", ()),
-        ("build_registry", (config,)), ("build_registry", ()),
-        ("get_registry", (config,)), ("get_registry", ()),
-        ("Registry", (config,)), ("Registry", ()),
-    ):
-        factory = getattr(providers_mod, attr, None)
-        if factory is None:
-            continue
-        try:
-            inner = factory(*args)
-        except TypeError:
-            continue
-        except Exception as exc:
-            _warn("providers.%s failed: %r" % (attr, exc))
-            continue
-        if inner is not None:
-            break
-
-    if inner is None:
-        inner = getattr(providers_mod, "REGISTRY", None) or getattr(providers_mod, "registry", None)
-    if inner is None:
-        inner = providers_mod          # module-level PROVIDERS + stream_chat
-
-    return RegistryProxy(inner, config, providers_mod)
 
 
 # ==========================================================================
@@ -916,35 +570,17 @@ class History(object):
         self.messages.append(record)
         return record
 
-    def add_tool_call(self, chamadas):
-        """Turno do assistente que so pediu ferramentas, sem texto."""
-        record = {
-            "id": uuid.uuid4().hex,
-            "role": "assistant",
-            "content": "",
-            "tool_calls": list(chamadas),
-            "ts": time.time(),
-            "provider": self.provider,
-            "model": self.model,
-        }
-        self.messages.append(record)
-        return record
+    def replace_content(self, msg_id, text):
+        """Regrava o conteudo da mensagem ``msg_id`` (stream em andamento).
 
-    def add_tool_result(self, nome, conteudo):
-        """Resposta da ferramenta, que volta ao modelo no proximo passo."""
-        record = {
-            "id": uuid.uuid4().hex,
-            "role": "tool",
-            "tool_name": nome,
-            "content": conteudo or "",
-            "ts": time.time(),
-        }
-        self.messages.append(record)
-        return record
-
-    def replace_last_content(self, text):
-        if self.messages:
-            self.messages[-1]["content"] = text
+        Enderecada por id de proposito: "a ultima mensagem" muda embaixo
+        do stream quando o usuario troca de conversa no meio do turno.
+        """
+        for m in self.messages:
+            if m.get("id") == msg_id:
+                m["content"] = text
+                return True
+        return False
 
     def set_metricas(self, msg_id, espera, geracao, vel):
         """Guarda tempo e velocidade DAQUELA resposta junto da mensagem.
@@ -1039,6 +675,16 @@ class History(object):
             provider or current.get("provider", ""),
             model or current.get("model", ""),
         )
+
+    # -- vinculo com a sessao do Hermes ----------------------------------
+    # O transcript de verdade mora no SQLite do Hermes; o cache local guarda
+    # a chave duravel da sessao para a conversa poder continuar de onde
+    # parou depois de um restore ou restart.
+    def set_hermes_session(self, stored_id):
+        self.current["hermes_session"] = str(stored_id or "")
+
+    def hermes_session(self):
+        return str(self.current.get("hermes_session") or "")
 
 
 # ==========================================================================
@@ -1154,6 +800,13 @@ class HydeAiApplication(Adw.Application):
                 self.window.shutdown()
             except Exception as exc:
                 _warn("shutdown failed: %r" % (exc,))
+        if self.registry is not None:
+            closer = getattr(self.registry, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception as exc:
+                    _warn("hermes close failed: %r" % (exc,))
         if self.history is not None:
             try:
                 self.history.save()
