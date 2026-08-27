@@ -11,9 +11,9 @@ cat <<'AVISO'
 |  hyde-ai esta em BETA -- uso nao recomendado.                  |
 |  Instavel, com caminhos nao testados e API sujeita a mudar.    |
 |                                                               |
-|  O backend e o Hermes Agent: todo turno e agentico e pode      |
-|  rodar comandos na sua maquina. O que altera o sistema pede    |
-|  a sua permissao, inline na conversa.                          |
+|  O backend e o Hypr-IA: todo turno e agentico e pode rodar     |
+|  comandos na sua maquina. O que altera o sistema pede a sua    |
+|  permissao, inline na conversa.                                |
 +---------------------------------------------------------------+
 AVISO
 sleep 2
@@ -26,7 +26,7 @@ faltando=()
 # python-markdown-it-py + mdit_py_plugins: markdown e matematica
 for p in gtk4-layer-shell python-gobject libadwaita gtksourceview5 \
          python-matplotlib librsvg python-markdown-it-py python-mdit_py_plugins \
-         python-pylatexenc ttf-cascadia-code-nerd; do
+         python-pylatexenc; do
     pacman -Qq "$p" &>/dev/null || faltando+=("$p")
 done
 if [ ${#faltando[@]} -gt 0 ]; then
@@ -61,8 +61,9 @@ if pgrep -u "$USER" -f "$PADRAO" >/dev/null 2>&1; then
 fi
 mkdir -p "$LIB" "$BIN" "$CFG/hyde/wallbash/always" "$CFG/hyde/wallbash/scripts" \
          "$HOME/.local/state/hyde-ai" "$HOME/.cache/hyde-ai/math"
-# modulos aposentados pela fusao com o Hermes (upgrade de versoes antigas)
-rm -f "$LIB/agent.py" "$LIB/providers.py"
+# modulos aposentados pela fusao com o backend (upgrade de versoes antigas)
+rm -f "$LIB/agent.py" "$LIB/providers.py" \
+      "$LIB/hermes_client.py" "$LIB/hermes_registry.py"
 rm -rf "$LIB/__pycache__"
 cp -f "$BASE"/lib/*.py "$LIB/"
 cp -f "$BASE"/bin/hyde-ai "$BIN/" && chmod +x "$BIN/hyde-ai"
@@ -79,35 +80,48 @@ else
     echo "    config existente preservada"
 fi
 
-echo "==> Hermes (backend)"
-# O painel nao fala mais com APIs de modelo: ele spawna o gateway do Hermes
-# Agent num venv proprio (o Python do sistema nao serve -- o Hermes exige
-# >=3.11,<3.14) e conversa por JSON-RPC via stdio.
-HERMES_DIR="${HYDE_AI_HERMES_DIR:-$HOME/Projetos/hermes-agent}"
-if [ ! -f "$HERMES_DIR/pyproject.toml" ]; then
-    echo "    clonando o hermes-agent em $HERMES_DIR"
-    git clone --depth 1 https://github.com/NousResearch/hermes-agent "$HERMES_DIR" \
-        || echo "    AVISO: clone falhou -- clone manualmente (ou exporte" \
-                "HYDE_AI_HERMES_DIR) e rode o install.sh de novo"
+echo "==> Hypr-IA (backend)"
+# O painel nao fala com APIs de modelo: ele spawna o gateway do Hypr-IA num
+# venv proprio (o Python do sistema nao serve -- o backend exige
+# >=3.11,<3.14) e conversa por JSON-RPC via stdio. A base do Hypr-IA e um
+# fork do hermes-agent (Nous Research); o clone abaixo e so o bootstrap.
+HYPRIA_DIR="${HYDE_AI_HYPRIA_DIR:-${HYDE_AI_HERMES_DIR:-$HOME/Projetos/hypr-ia}}"
+HYPRIA_HOME="${HERMES_HOME:-$HOME/.hypr-ia}"
+
+# Migracao da era "hermes": pasta do checkout e pasta de estado.
+if [ ! -e "$HYPRIA_DIR" ] && [ -f "$HOME/Projetos/hermes-agent/pyproject.toml" ]; then
+    echo "    migrando ~/Projetos/hermes-agent -> $HYPRIA_DIR"
+    mv "$HOME/Projetos/hermes-agent" "$HYPRIA_DIR"
 fi
-if [ ! -f "$HERMES_DIR/pyproject.toml" ]; then
-    echo "    AVISO: sem hermes-agent o painel nao tem backend"
+if [ ! -e "$HYPRIA_HOME" ] && [ -d "$HOME/.hermes" ]; then
+    echo "    migrando ~/.hermes -> $HYPRIA_HOME"
+    mv "$HOME/.hermes" "$HYPRIA_HOME"
+fi
+
+if [ ! -f "$HYPRIA_DIR/pyproject.toml" ]; then
+    echo "    clonando a base do Hypr-IA em $HYPRIA_DIR"
+    git clone --depth 1 https://github.com/NousResearch/hermes-agent "$HYPRIA_DIR" \
+        || echo "    AVISO: clone falhou -- clone manualmente (ou exporte" \
+                "HYDE_AI_HYPRIA_DIR) e rode o install.sh de novo"
+fi
+if [ ! -f "$HYPRIA_DIR/pyproject.toml" ]; then
+    echo "    AVISO: sem o checkout do Hypr-IA o painel nao tem backend"
 else
     if ! command -v uv &>/dev/null; then
-        echo "    instalando uv (gerencia o venv e o Python 3.11 do Hermes)"
+        echo "    instalando uv (gerencia o venv e o Python 3.11 do backend)"
         sudo pacman -S --needed --noconfirm uv \
             || echo "    AVISO: instale o uv manualmente e rode de novo"
     fi
     if command -v uv &>/dev/null; then
-        echo "    uv sync em $HERMES_DIR (a primeira vez demora)"
-        (cd "$HERMES_DIR" && uv sync) \
+        echo "    uv sync em $HYPRIA_DIR (a primeira vez demora)"
+        (cd "$HYPRIA_DIR" && uv sync) \
             || echo "    AVISO: uv sync falhou; rode-o manualmente"
     fi
-    # hermes.path entra sempre que o checkout existe; hermes.python so com o
+    # hypria.path entra sempre que o checkout existe; hypria.python so com o
     # venv pronto (sem ele, from_config ainda acha .venv/bin/python depois).
-    HPY="$HERMES_DIR/.venv/bin/python"
+    HPY="$HYPRIA_DIR/.venv/bin/python"
     [ -x "$HPY" ] || HPY=""
-    if python3 - "$CFG/hyde-ai/config.json" "$HPY" "$HERMES_DIR" <<'PYEOF'
+    if python3 - "$CFG/hyde-ai/config.json" "$HPY" "$HYPRIA_DIR" <<'PYEOF'
 import json, os, sys
 caminho, py, repo = sys.argv[1], sys.argv[2], sys.argv[3]
 dados = {}
@@ -116,10 +130,12 @@ if os.path.exists(caminho):
         dados = json.load(open(caminho))
     except Exception:
         dados = {}
-hermes = dados.setdefault("hermes", {})
-hermes["path"] = repo
+if "hermes" in dados and "hypria" not in dados:
+    dados["hypria"] = dados.pop("hermes")
+hypria = dados.setdefault("hypria", {})
+hypria["path"] = repo
 if py:
-    hermes["python"] = py
+    hypria["python"] = py
 tmp = caminho + ".tmp"
 with open(tmp, "w") as fh:
     json.dump(dados, fh, indent=2, ensure_ascii=False)
@@ -129,14 +145,49 @@ os.chmod(caminho, 0o600)
 PYEOF
     then
         if [ -n "$HPY" ]; then
-            echo "    hermes.python e hermes.path gravados no config"
+            echo "    hypria.python e hypria.path gravados no config"
         else
-            echo "    hermes.path gravado; venv ausente -- rode 'uv sync' em" \
-                 "$HERMES_DIR e o install.sh de novo"
+            echo "    hypria.path gravado; venv ausente -- rode 'uv sync' em" \
+                 "$HYPRIA_DIR e o install.sh de novo"
         fi
     else
-        echo "    AVISO: falhou gravar o config -- ajuste hermes.python e" \
-             "hermes.path em $CFG/hyde-ai/config.json" >&2
+        echo "    AVISO: falhou gravar o config -- ajuste hypria.python e" \
+             "hypria.path em $CFG/hyde-ai/config.json" >&2
+    fi
+
+    echo "==> Plugin hypr-arch (tools Hyprland + Arch)"
+    mkdir -p "$HYPRIA_HOME/plugins"
+    rm -rf "$HYPRIA_HOME/plugins/hypr-arch"
+    cp -r "$BASE/plugins/hypr-arch" "$HYPRIA_HOME/plugins/hypr-arch"
+    if [ -n "$HPY" ]; then
+        # Plugins de usuario sao opt-in: entra em plugins.enabled no
+        # config.yaml do backend (o venv tem PyYAML; o python3 do sistema
+        # pode nao ter).
+        if HERMES_HOME="$HYPRIA_HOME" "$HPY" - "$HYPRIA_HOME/config.yaml" <<'PYEOF'
+import sys, yaml, os
+caminho = sys.argv[1]
+dados = {}
+if os.path.exists(caminho):
+    with open(caminho) as fh:
+        dados = yaml.safe_load(fh) or {}
+plugins = dados.setdefault("plugins", {})
+ativos = plugins.get("enabled") or []
+if "hypr-arch" not in ativos:
+    ativos.append("hypr-arch")
+    plugins["enabled"] = ativos
+    tmp = caminho + ".tmp"
+    with open(tmp, "w") as fh:
+        yaml.safe_dump(dados, fh, sort_keys=False, allow_unicode=True)
+    os.replace(tmp, caminho)
+PYEOF
+        then
+            echo "    plugin instalado e ativado (toolsets hyprland + archlinux)"
+        else
+            echo "    AVISO: nao ativei o plugin -- adicione 'hypr-arch' em" \
+                 "plugins.enabled no $HYPRIA_HOME/config.yaml" >&2
+        fi
+    else
+        echo "    plugin copiado; ative depois do uv sync rodando o install de novo"
     fi
 fi
 
@@ -147,7 +198,7 @@ echo "==> Cores do tema"
 # passa pelos templates, entao reaplicar o tema atual e o caminho garantido.
 hyde-shell reload >/dev/null 2>&1 || true
 CSS="${XDG_CACHE_HOME:-$HOME/.cache}/hyde/wallbash/hyde-ai.css"
-if [ ! -s "$CSS" ] || ! grep -q "tool-cmd" "$CSS" 2>/dev/null; then
+if [ ! -s "$CSS" ] || ! grep -q "effort-btn" "$CSS" 2>/dev/null; then
     TEMA="$(sed -n 's/^HYDE_THEME="\(.*\)"$/\1/p' \
             "${XDG_STATE_HOME:-$HOME/.local/state}/hyde/staterc" 2>/dev/null)"
     SWITCH="$HOME/.local/lib/hyde/theme.switch.sh"
@@ -169,4 +220,4 @@ if [ "$RODAVA" -eq 1 ]; then
     echo "==> Reiniciando o painel"
     "$BIN/hyde-ai" --daemon >/dev/null 2>&1 || true
 fi
-echo "==> Pronto.  hyde-ai --setup   para conferir o Hermes e as chaves"
+echo "==> Pronto.  hyde-ai --setup   para conferir o Hypr-IA e as chaves"

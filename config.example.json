@@ -1,12 +1,13 @@
 {
-  "_comentario": "Copie para ~/.config/hyde-ai/config.json (o install.sh faz isso). O backend e o Hermes Agent: as chaves de API e o modelo padrao moram em ~/.hermes/, nao aqui.",
-  "hermes": {
+  "_comentario": "Copie para ~/.config/hyde-ai/config.json (o install.sh faz isso). O backend e o Hypr-IA (base: hermes-agent da Nous Research): as chaves de API e o modelo padrao moram em ~/.hypr-ia/, nao aqui.",
+  "hypria": {
     "python": "",
     "path": "",
     "model": "",
     "provider": "",
     "reasoning_effort": "",
-    "show_thinking": true
+    "show_thinking": true,
+    "agent_mode": true
   },
   "sidebar": {
     "edge": "right",

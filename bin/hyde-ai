@@ -89,27 +89,27 @@ ENTRY_CANDIDATES = (
     ("app.py", lambda py, lib, path: [py, path]),
 )
 
-# O backend e o Hermes Agent num processo separado (venv proprio -- o Python
-# do sistema nao roda o Hermes, que exige >=3.11,<3.14). Estes defaults valem
+# O backend e o Hypr-IA num processo separado (venv proprio -- o Python
+# do sistema nao roda o Hypria, que exige >=3.11,<3.14). Estes defaults valem
 # quando o config ainda nao aponta os caminhos.
-DEFAULT_HERMES_DIR = os.path.expanduser(
-    os.environ.get("HYDE_AI_HERMES_DIR", "~/Projetos/hermes-agent"))
-HERMES_HOME = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
+DEFAULT_HYPRIA_DIR = os.path.expanduser(
+    os.environ.get("HYDE_AI_HYPRIA_DIR", "~/Projetos/hypr-ia"))
+HYPRIA_HOME = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hypr-ia"))
 
 
-def hermes_dir(config: dict) -> str:
-    valor = (cfg_get(config, "hermes.path", "") or "").strip()
-    return os.path.expanduser(valor) if valor else DEFAULT_HERMES_DIR
+def hypria_dir(config: dict) -> str:
+    valor = (cfg_get(config, "hypria.path", "") or "").strip()
+    return os.path.expanduser(valor) if valor else DEFAULT_HYPRIA_DIR
 
 
-def hermes_python(config: dict) -> str:
-    valor = (cfg_get(config, "hermes.python", "") or "").strip()
+def hypria_python(config: dict) -> str:
+    valor = (cfg_get(config, "hypria.python", "") or "").strip()
     if valor:
         return os.path.expanduser(valor)
-    return os.path.join(hermes_dir(config), ".venv", "bin", "python")
+    return os.path.join(hypria_dir(config), ".venv", "bin", "python")
 
 
-def check_hermes_gateway(python: str, cwd: str, timeout: float = 20.0):
+def check_hypria_gateway(python: str, cwd: str, timeout: float = 20.0):
     """Sobe o gateway de verdade, espera o gateway.ready, faz um ping.
 
     Devolve (ok, detalhe). Autossuficiente e stdlib-only, como o resto do
@@ -337,9 +337,9 @@ def atomic_write(path: str, data: str, mode: int = 0o600) -> None:
 # setting the sidebar wrote and can never introduce a key the sidebar does not
 # understand.
 #
-# Chaves de API nao moram mais aqui: elas sao do Hermes (~/.hermes/.env).
+# Chaves de API nao moram mais aqui: elas sao do Hypria (~/.hypr-ia/.env).
 # Este arquivo guarda geometria do painel e os caminhos do backend
-# (hermes.python / hermes.path).
+# (hypria.python / hypria.path).
 
 def read_config() -> dict:
     """Return config.json exactly as it is on disk ({} if absent/unreadable)."""
@@ -926,18 +926,18 @@ def cmd_doctor(args) -> int:
             warnings += 1
 
     print()
-    print(bold("hermes (backend)"))
+    print(bold("hypria (backend)"))
     config = read_config()
-    hdir = hermes_dir(config)
-    hpy = hermes_python(config)
+    hdir = hypria_dir(config)
+    hpy = hypria_python(config)
 
     if os.path.isfile(os.path.join(hdir, "pyproject.toml")):
         print("  [%s] %-24s %s" % (green("  ok  "), "checkout", hdir))
     else:
         print("  [%s] %-24s %s" % (red(" FAIL "), "checkout",
                                    hdir + " (sem pyproject.toml)"))
-        print("        %s" % dim("clone o hermes-agent ali, ou aponte "
-                                 "hermes.path no config"))
+        print("        %s" % dim("clone o hypr-ia ali, ou aponte "
+                                 "hypria.path no config"))
         failures += 1
 
     if os.path.exists(hpy):
@@ -949,13 +949,13 @@ def cmd_doctor(args) -> int:
             pass
         print("  [%s] %-24s %s" % (green("  ok  "), "venv python",
                                    "%s (%s)" % (hpy, versao or "?")))
-        if not (cfg_get(config, "hermes.python", "") or "").strip():
-            print("  [%s] %-24s %s" % (yellow(" warn "), "hermes.python",
+        if not (cfg_get(config, "hypria.python", "") or "").strip():
+            print("  [%s] %-24s %s" % (yellow(" warn "), "hypria.python",
                                        "vazio no config (usando o fallback "
                                        "<path>/.venv)"))
             print("        %s" % dim("grave com:  hyde-ai --setup"))
             warnings += 1
-        ok, detalhe = check_hermes_gateway(hpy, hdir)
+        ok, detalhe = check_hypria_gateway(hpy, hdir)
         if ok:
             print("  [%s] %-24s %s" % (green("  ok  "), "gateway", detalhe))
         else:
@@ -969,9 +969,9 @@ def cmd_doctor(args) -> int:
         print("        %s" % dim("crie com:  cd %s && uv sync" % hdir))
         failures += 1
 
-    for rotulo, caminho in (("hermes config", os.path.join(HERMES_HOME,
+    for rotulo, caminho in (("hypria config", os.path.join(HYPRIA_HOME,
                                                            "config.yaml")),
-                            ("hermes state", os.path.join(HERMES_HOME,
+                            ("hypria state", os.path.join(HYPRIA_HOME,
                                                           "state.db"))):
         if os.path.exists(caminho):
             print("  [%s] %-24s %s" % (green("  ok  "), rotulo, caminho))
@@ -1058,22 +1058,22 @@ def cmd_setup(args) -> int:
     existed = os.path.exists(CONFIG_FILE)
 
     print(bold("hyde-ai setup"))
-    print("O backend e o Hermes Agent, num venv proprio. Este assistente")
-    print("aponta o painel para ele; as chaves de API moram no Hermes")
-    print("(%s/.env), nao mais aqui." % HERMES_HOME)
+    print("O backend e o Hypr-IA, num venv proprio. Este assistente")
+    print("aponta o painel para ele; as chaves de API moram no Hypria")
+    print("(%s/.env), nao mais aqui." % HYPRIA_HOME)
     print()
 
-    # ---- caminhos do Hermes ----------------------------------------------
-    print(bold("Hermes"))
-    hdir = ask("  checkout do hermes-agent", hermes_dir(config))
+    # ---- caminhos do Hypria ----------------------------------------------
+    print(bold("Hypria"))
+    hdir = ask("  checkout do hypr-ia", hypria_dir(config))
     hdir = os.path.expanduser(hdir)
     if not os.path.isfile(os.path.join(hdir, "pyproject.toml")):
         print("  " + yellow("sem pyproject.toml em %s" % hdir))
         print("  " + dim("clone com: git clone "
                          "https://github.com/NousResearch/hermes-agent " + hdir))
     hpy_padrao = os.path.join(hdir, ".venv", "bin", "python")
-    hpy_atual = (cfg_get(config, "hermes.python", "") or "").strip()
-    hpy = ask("  python que roda o Hermes", hpy_atual or hpy_padrao)
+    hpy_atual = (cfg_get(config, "hypria.python", "") or "").strip()
+    hpy = ask("  python que roda o Hypria", hpy_atual or hpy_padrao)
     hpy = os.path.expanduser(hpy)
     if not os.path.exists(hpy):
         print("  " + yellow("esse python ainda nao existe (%s)" % hpy))
@@ -1089,27 +1089,27 @@ def cmd_setup(args) -> int:
             else:
                 print("  " + dim("instale o uv (sudo pacman -S uv) e rode "
                                  "`uv sync` em %s" % hdir))
-    cfg_set(config, "hermes.path", hdir)
-    cfg_set(config, "hermes.python", hpy)
-    print("  hermes.path:   " + green(hdir))
-    print("  hermes.python: " + green(hpy))
+    cfg_set(config, "hypria.path", hdir)
+    cfg_set(config, "hypria.python", hpy)
+    print("  hypria.path:   " + green(hdir))
+    print("  hypria.python: " + green(hpy))
     print()
 
     # ---- teste real -------------------------------------------------------
     if os.path.exists(hpy):
         print(bold("Teste do gateway"))
-        ok, detalhe = check_hermes_gateway(hpy, hdir)
+        ok, detalhe = check_hypria_gateway(hpy, hdir)
         print("  " + (green(detalhe) if ok else red(detalhe)))
         print()
 
     # ---- chaves -----------------------------------------------------------
     print(bold("Chaves de API"))
-    print("  As chaves ficam com o Hermes:")
+    print("  As chaves ficam com o Hypria:")
     print("  " + dim("* no painel:  /key <provedor> <valor>  (ex.: /key "
                      "openrouter sk-...)"))
-    print("  " + dim("* ou direto em %s/.env" % HERMES_HOME))
+    print("  " + dim("* ou direto em %s/.env" % HYPRIA_HOME))
     print("  " + dim("* modelo padrao: `model:` em %s/config.yaml"
-                     % HERMES_HOME))
+                     % HYPRIA_HOME))
     print()
 
     if not existed:
@@ -1153,12 +1153,12 @@ def cmd_setup(args) -> int:
 EPILOG = """\
 examples:
   hyde-ai                 toggle the sidebar (this is what the keybind runs)
-  hyde-ai --setup         point the panel at the Hermes backend and test it
+  hyde-ai --setup         point the panel at the Hypria backend and test it
   hyde-ai --doctor        check every dependency and integration point
   hyde-ai --log -f        follow the sidebar's output
 
 files:
-  ~/.config/hyde-ai/config.json          panel config + hermes paths (0600)
+  ~/.config/hyde-ai/config.json          panel config + hypria paths (0600)
   ~/.local/lib/hyde-ai/                  the Python package
   ~/.local/state/hyde-ai/                chat history and log
   ~/.cache/hyde/wallbash/hyde-ai.css     generated theme, follows the wallpaper

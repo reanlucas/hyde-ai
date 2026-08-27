@@ -189,6 +189,35 @@ window, window.background { background-color: transparent; }
 .think-btn:hover { background-color: alpha(@ha_layer1, 0.55); }
 .think-btn.think-off { color: @ha_fg_ghost; }
 
+/* seletor do esforco de raciocinio, irmao do think-btn */
+.effort-btn {
+  padding: 2px 8px;
+  min-height: 22px;
+  border-radius: 8px;
+  font-size: 11px;
+  color: @ha_fg_muted;
+  background: none;
+  border: none;
+  box-shadow: none;
+}
+.effort-btn:hover { background-color: alpha(@ha_layer1, 0.55); }
+.effort-btn arrow { -gtk-icon-size: 0px; min-width: 0px; }
+.effort-pop contents {
+  background-color: @ha_layer0;
+  border: 1px solid alpha(@ha_fg_ghost, 0.25);
+  border-radius: 10px;
+  padding: 2px;
+}
+.effort-row {
+  padding: 3px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: @ha_fg_muted;
+  background: none;
+}
+.effort-row:hover { background-color: alpha(@ha_layer1, 0.7); }
+.effort-row.effort-atual { color: @ha_accent; font-weight: bold; }
+
 .think-body {
   font-size: 12px;
   color: @ha_fg_faint;

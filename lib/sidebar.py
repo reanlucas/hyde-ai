@@ -1528,7 +1528,7 @@ class ToolBlock(Gtk.Box):
 
 
 class ApprovalBlock(Gtk.Box):
-    """Pedido de aprovacao vindo do Hermes: o comando a vista, decisao sua.
+    """Pedido de aprovacao vindo do Hypria: o comando a vista, decisao sua.
 
     As escolhas vem do gateway (once/session/always/deny); a resposta volta
     por approval.respond e o agente fica parado ate o clique.  Usa as mesmas
@@ -1616,7 +1616,7 @@ class ApprovalBlock(Gtk.Box):
 
 
 class ClarifyBlock(Gtk.Box):
-    """Pergunta do Hermes no meio do turno (clarify.request).
+    """Pergunta do Hypria no meio do turno (clarify.request).
 
     Botoes quando o gateway manda opcoes; senao, um campo de texto.  A
     resposta volta por clarify.respond e o turno continua.
@@ -2047,9 +2047,13 @@ class SelectorButton(Gtk.MenuButton):
 # overlaid placeholder mirrors it, so the hint sits exactly on the caret.
 _INPUT_INSET = 8
 
+# Niveis de esforco de raciocinio que o Hypria aceita (config.set reasoning).
+_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max",
+            "ultra")
+
 HELP_TEXT = """## hyde-ai
 
-O backend agora e o **Hermes**: todo turno e agentico (arquivos, comandos,
+O backend agora e o **Hypria**: todo turno e agentico (arquivos, comandos,
 web, memoria), e o que altera o sistema pede a sua permissao inline.
 
 **Slash commands**
@@ -2058,17 +2062,18 @@ web, memoria), e o que altera o sistema pede a sua permissao inline.
 - `/clear` — start a fresh conversation
 - `/provider` — list providers, `/provider <id>` to switch
 - `/model` — list models, `/model <id>` to switch
-- `/key <provider> <value>` — store an API key (no Hermes)
+- `/key <provider> <value>` — store an API key (no Hypria)
 - `/keys` — show which providers have a key
-- `/historico` — conversas salvas no Hermes · `/historico abrir <n|id>`
-- `/think on|off|low|medium|high` — rascunho visivel / esforco
+- `/historico` — conversas salvas no Hypria · `/historico abrir <n|id>`
+- `/think on|off|<esforco>` — rascunho visivel / esforco (none…ultra)
+- `/agente on|off` — liga/desliga as ferramentas (modo agente)
 - `/velocidade` — tokens/s medio por modelo
 - `/refresh` — rescan providers and models now
 - `/restart` — restart hyde-ai
 - `/side left|right` — which edge the panel opens on
 - `/width 35` — panel width, as a percent or `700px`
 
-Qualquer outro `/comando` vai direto para o Hermes (`/memoria`, `/skills`...).
+Qualquer outro `/comando` vai direto para o Hypria (`/memoria`, `/skills`...).
 
 **Keys**
 
@@ -2083,17 +2088,17 @@ Qualquer outro `/comando` vai direto para o Hermes (`/memoria`, `/skills`...).
 COMANDOS = [
     ("/help",      "",                    "mostra a ajuda"),
     ("/clear",     "",                    "comeca uma conversa nova"),
-    ("/historico", "[abrir <n|id>]",      "conversas salvas no Hermes"),
+    ("/historico", "[abrir <n|id>]",      "conversas salvas no Hypria"),
     ("/provider",  "[id]",                "lista ou troca de provedor"),
     ("/model",     "[id]",                "lista ou troca de modelo"),
-    ("/key",       "<provedor> <valor>",  "guarda uma chave de API no Hermes"),
+    ("/key",       "<provedor> <valor>",  "guarda uma chave de API no Hypria"),
     ("/keys",      "",                    "mostra quais provedores tem chave"),
     ("/refresh",   "",                    "reprocura provedores e modelos"),
     ("/side",      "left|right",          "borda em que o painel abre"),
     ("/width",     "35 | 700px",           "largura do painel"),
     ("/velocidade","",                    "tokens/s medio por modelo"),
-    ("/think",     "on|off|low|medium|high", "rascunho visivel / esforco"),
-    ("/agente",    "",                    "como funciona o agente (Hermes)"),
+    ("/think",     "on|off|<esforco>",    "rascunho visivel / esforco"),
+    ("/agente",    "on|off",              "liga/desliga o modo agente"),
     ("/restart",   "",                    "reinicia o hyde-ai"),
 ]
 
@@ -2108,15 +2113,15 @@ class Sidebar(Gtk.ApplicationWindow):
         self.history = history
         self.theme = theme
 
-        # Eventos fora de turno do Hermes (titulo, notificacao, queda do
+        # Eventos fora de turno do Hypria (titulo, notificacao, queda do
         # gateway) chegam numa thread de fundo; daqui so marshala.
         registrador = getattr(registry, "set_ui_handler", None)
         if callable(registrador):
             registrador(lambda params: GLib.idle_add(
-                self._on_hermes_background, dict(params or {})))
-        # A conversa restaurada do cache continua a mesma sessao do Hermes.
+                self._on_hypria_background, dict(params or {})))
+        # A conversa restaurada do cache continua a mesma sessao do Hypria.
         adotar = getattr(registry, "adopt_session", None)
-        vinculo = getattr(history, "hermes_session", None)
+        vinculo = getattr(history, "hypria_session", None)
         if callable(adotar) and callable(vinculo) and vinculo():
             adotar(vinculo())
 
@@ -2133,7 +2138,7 @@ class Sidebar(Gtk.ApplicationWindow):
 
         self._stream_seq = 0
         self._cancel = None
-        self._hermes_tools = {}
+        self._hypria_tools = {}
         self._aprovacoes = {}
         self._clarifies = {}            # request_id -> [ClarifyBlock]
         self._stream_pendente = False   # _start_stream agendado no idle
@@ -2412,7 +2417,7 @@ class Sidebar(Gtk.ApplicationWindow):
         overlay = Gtk.Overlay()
         overlay.set_child(input_scroll)
         self._input_placeholder = Gtk.Label(
-            label="Message the model…  “/” for commands", xalign=0.0
+            label="Pergunte algo…  “/” para comandos", xalign=0.0
         )
         self._input_placeholder.add_css_class("input-placeholder")
         self._input_placeholder.set_halign(Gtk.Align.START)
@@ -2430,10 +2435,20 @@ class Sidebar(Gtk.ApplicationWindow):
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         controls.add_css_class("input-controls")
 
-        # Mostrar (ou nao) o raciocinio e uma decisao por pergunta, nao de
-        # configuracao. Por isso mora aqui, ao lado do envio, e nao enterrado
-        # num arquivo. O agente nao tem mais botao: agora ele E o backend
-        # (Hermes), e o que altera o sistema pede permissao inline.
+        # Modo agente e raciocinio sao decisoes por pergunta, nao de
+        # configuracao — por isso moram aqui, ao lado do envio, e nao
+        # enterrados num arquivo. O toggle do agente liga/desliga os
+        # toolsets do Hypria: desligado, o turno vira conversa pura.
+        self._agent_sync = False
+        self._agent_btn = Gtk.ToggleButton()
+        self._agent_btn.set_child(
+            Gtk.Image.new_from_icon_name("utilities-terminal-symbolic"))
+        self._agent_btn.add_css_class("flat")
+        self._agent_btn.add_css_class("agent-btn")
+        self._agent_btn.connect("toggled", self._on_agent_toggled)
+        controls.append(self._agent_btn)
+        self._sync_agent_btn()
+
         self._think_sync = False
         self._think_btn = Gtk.ToggleButton()
         self._think_btn.set_child(Gtk.Image.new_from_icon_name("weather-clear-symbolic"))
@@ -2442,6 +2457,30 @@ class Sidebar(Gtk.ApplicationWindow):
         self._think_btn.connect("toggled", self._on_think_toggled)
         controls.append(self._think_btn)
         self._sync_think_btn()
+
+        self._effort_pop = Gtk.Popover()
+        self._effort_pop.add_css_class("effort-pop")
+        caixa = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        caixa.set_margin_top(4)
+        caixa.set_margin_bottom(4)
+        caixa.set_margin_start(4)
+        caixa.set_margin_end(4)
+        self._effort_rows = {}
+        for valor in ("",) + _EFFORTS:
+            linha = Gtk.Button(label=valor or "padrao")
+            linha.add_css_class("flat")
+            linha.add_css_class("effort-row")
+            linha.connect("clicked",
+                          lambda _b, v=valor: self._on_effort_escolhido(v))
+            self._effort_rows[valor] = linha
+            caixa.append(linha)
+        self._effort_pop.set_child(caixa)
+        self._effort_btn = Gtk.MenuButton()
+        self._effort_btn.add_css_class("flat")
+        self._effort_btn.add_css_class("effort-btn")
+        self._effort_btn.set_popover(self._effort_pop)
+        controls.append(self._effort_btn)
+        self._sync_effort_btn()
 
         controls.append(_spacer())
 
@@ -2628,7 +2667,7 @@ class Sidebar(Gtk.ApplicationWindow):
         self._input_buffer.place_cursor(end)
 
     def _think_ligado(self):
-        return bool(self.config.get("hermes.show_thinking", True))
+        return bool(self.config.get("hypria.show_thinking", True))
 
     def _sync_think_btn(self):
         """Reflete a config no botao sem disparar o handler de volta."""
@@ -2658,7 +2697,7 @@ class Sidebar(Gtk.ApplicationWindow):
     def _on_think_toggled(self, btn):
         if getattr(self, "_think_sync", False):
             return
-        self.config.set("hermes.show_thinking", bool(btn.get_active()))
+        self.config.set("hypria.show_thinking", bool(btn.get_active()))
         try:
             self.config.save()
         except Exception as exc:
@@ -2667,6 +2706,129 @@ class Sidebar(Gtk.ApplicationWindow):
         self.show_banner(
             "Raciocinio visivel" if btn.get_active() else "Raciocinio escondido",
             2500)
+
+    # -- modo agente / esforco de raciocinio ---------------------------
+
+    def _agente_ligado(self):
+        return bool(self.config.get("hypria.agent_mode", True))
+
+    def _sync_agent_btn(self):
+        """Reflete a config no botao sem disparar o handler de volta."""
+        btn = getattr(self, "_agent_btn", None)
+        if btn is None:
+            return
+        ligado = self._agente_ligado()
+        self._agent_sync = True
+        try:
+            btn.set_active(ligado)
+        finally:
+            self._agent_sync = False
+        if ligado:
+            btn.set_tooltip_text(
+                "Modo agente ligado — o Hypria usa ferramentas (arquivos, "
+                "comandos, web…). Clique para desligar.")
+            btn.remove_css_class("agent-off")
+        else:
+            btn.set_tooltip_text(
+                "Modo agente desligado — so conversa, sem ferramentas. "
+                "Clique para ligar.")
+            btn.add_css_class("agent-off")
+
+    def _on_agent_toggled(self, btn):
+        if getattr(self, "_agent_sync", False):
+            return
+        self._definir_modo_agente(bool(btn.get_active()))
+
+    def _definir_modo_agente(self, ligado):
+        """Aplica o modo agente no gateway (worker; nunca no main loop).
+
+        Trocar os toolsets recria o agente da sessao no gateway, entao
+        nao mexe com turno em andamento — o botao volta ao estado real.
+        """
+        if ligado == self._agente_ligado():
+            self._sync_agent_btn()
+            return
+        if self._cancel is not None or getattr(self, "_stream_pendente", False):
+            self._sync_agent_btn()          # reverte o clique
+            self.show_banner(
+                "Espere o turno terminar para mudar o modo agente", 3000)
+            return
+        btn = getattr(self, "_agent_btn", None)
+        if btn is not None:
+            btn.set_sensitive(False)
+
+        def trabalho():
+            try:
+                self.registry.set_agent_mode(ligado)
+                erro = None
+            except Exception as exc:
+                erro = exc
+            GLib.idle_add(self._agente_aplicado, ligado, erro)
+
+        threading.Thread(target=trabalho, name="hyde-ai-agente",
+                         daemon=True).start()
+
+    def _agente_aplicado(self, ligado, erro):
+        btn = getattr(self, "_agent_btn", None)
+        if btn is not None:
+            btn.set_sensitive(True)
+        self._sync_agent_btn()
+        if erro is not None:
+            self.show_banner("Nao deu para mudar o modo agente: %s" % erro,
+                             5000)
+        else:
+            self.show_banner(
+                "Modo agente ligado — ferramentas ativas" if ligado
+                else "Modo agente desligado — so conversa", 3000)
+        return False
+
+    def _esforco_atual(self):
+        return str(self.config.get("hypria.reasoning_effort", "") or "")
+
+    def _sync_effort_btn(self):
+        btn = getattr(self, "_effort_btn", None)
+        if btn is None:
+            return
+        atual = self._esforco_atual()
+        btn.set_label(atual or "auto")
+        btn.set_tooltip_text(
+            "Esforco de raciocinio: %s (clique para trocar; aplica na "
+            "sessao atual)" % (atual or "padrao do Hypria"))
+        for valor, linha in getattr(self, "_effort_rows", {}).items():
+            if valor == atual:
+                linha.add_css_class("effort-atual")
+            else:
+                linha.remove_css_class("effort-atual")
+
+    def _on_effort_escolhido(self, valor):
+        pop = getattr(self, "_effort_pop", None)
+        if pop is not None:
+            pop.popdown()
+        if valor == self._esforco_atual():
+            return
+
+        def trabalho():
+            try:
+                self.registry.set_reasoning(valor)
+                erro = None
+            except Exception as exc:
+                erro = exc
+            GLib.idle_add(self._esforco_aplicado, valor, erro)
+
+        threading.Thread(target=trabalho, name="hyde-ai-esforco",
+                         daemon=True).start()
+
+    def _esforco_aplicado(self, valor, erro):
+        if erro is not None:
+            self.show_banner("Nao deu para mudar o raciocinio: %s" % erro,
+                             5000)
+        else:
+            self._sync_effort_btn()
+            self.show_banner(
+                "Raciocinio: %s" % (valor or
+                                    "padrao do Hypria (proxima sessao)"),
+                3000)
+        return False
 
     def _on_input_changed(self, _buffer):
         # May fire before the rest of the input area exists; stay defensive.
@@ -2749,7 +2911,7 @@ class Sidebar(Gtk.ApplicationWindow):
             return
 
         # Antes do model.options chegar, a lista e a linha sintetica
-        # "Hermes" — serve para a tela, mas nao pode ser persistida como
+        # "Hypria" — serve para a tela, mas nao pode ser persistida como
         # escolha do usuario (apagaria o provider/modelo reais salvos).
         inventario_ok = bool(getattr(self.registry, "inventory_loaded", True))
 
@@ -2814,17 +2976,16 @@ class Sidebar(Gtk.ApplicationWindow):
 
         provider = self._provider_by_id(active_pid)
         if provider is not None and not provider.available:
-            self._status_label.set_text("no API key")
-            self.show_banner(
-                "%s is unavailable: %s  —  set a key with:  /key %s <value>"
-                % (provider.name, provider.hint or "no API key", provider.id),
-                timeout_ms=0,
-            )
+            # Sem banner: um provedor sem chave nao e um problema ate a
+            # pessoa tentar usa-lo — o aviso mora no envio, nao aqui.
+            self._status_label.set_text("sem chave")
         else:
             self._status_label.set_text(active_model or "")
         self._update_send_state()
 
         self._sync_think_btn()
+        self._sync_agent_btn()
+        self._sync_effort_btn()
 
     def set_edge(self, side):
         """Move the panel to the given screen edge and persist the choice."""
@@ -2935,7 +3096,7 @@ class Sidebar(Gtk.ApplicationWindow):
             self._fechar_paleta()
             return
 
-        catalogo = COMANDOS + getattr(self, "_comandos_hermes", [])
+        catalogo = COMANDOS + getattr(self, "_comandos_hypria", [])
         achados = [c for c in catalogo if c[0][1:].startswith(termo.lower())]
         if not achados:
             self._fechar_paleta()
@@ -3143,9 +3304,9 @@ class Sidebar(Gtk.ApplicationWindow):
             if self.history.abrir(conv_id):
                 self.history.save()
                 self.reload_conversation()
-                # Continua a mesma sessao do Hermes desta conversa (lazy).
+                # Continua a mesma sessao do Hypria desta conversa (lazy).
                 adotar = getattr(self.registry, "adopt_session", None)
-                vinculo = getattr(self.history, "hermes_session", None)
+                vinculo = getattr(self.history, "hypria_session", None)
                 if callable(adotar):
                     adotar(vinculo() if callable(vinculo) else "")
                 self.show_banner("Conversa restaurada.", timeout_ms=2500)
@@ -3184,7 +3345,7 @@ class Sidebar(Gtk.ApplicationWindow):
             self._sync_selectors()
         except Exception as exc:
             _warn("sync after rescan failed: %r" % (exc,))
-        self._carregar_comandos_hermes()
+        self._carregar_comandos_hypria()
         after = tuple(self._known_model_ids())
         if announce:
             added = [m for m in after if m not in before]
@@ -3239,7 +3400,7 @@ class Sidebar(Gtk.ApplicationWindow):
         self._aplicar_troca_modelo()
 
     def _aplicar_troca_modelo(self):
-        """Leva a escolha do picker para a sessao do Hermes (fora do main
+        """Leva a escolha do picker para a sessao do Hypria (fora do main
         loop -- config.set e uma RPC).  No meio de um turno o gateway defere
         a troca para o proximo, o que ja e o comportamento certo."""
         trocar = getattr(self.registry, "set_model", None)
@@ -3254,7 +3415,7 @@ class Sidebar(Gtk.ApplicationWindow):
             if aviso:
                 self.show_banner(str(aviso), 8000)
 
-        self._hermes_async(lambda: trocar(modelo, provedor), on_ok=feito)
+        self._hypria_async(lambda: trocar(modelo, provedor), on_ok=feito)
 
     def _update_send_state(self):
         if self._cancel is not None:
@@ -3308,7 +3469,7 @@ class Sidebar(Gtk.ApplicationWindow):
             name=display_name,
             msg_id=msg_id,
             on_delete=self._on_delete_row,
-            # Regenerar sumiu: o transcript de verdade e do Hermes, e reenviar
+            # Regenerar sumiu: o transcript de verdade e do Hypria, e reenviar
             # a ultima pergunta numa sessao que ja respondeu sairia errado.
             on_regenerate=None,
             show_line_numbers=self._show_line_numbers,
@@ -3393,7 +3554,7 @@ class Sidebar(Gtk.ApplicationWindow):
             self.history.save()
         except Exception as exc:
             _warn("history.new_conversation failed: %r" % (exc,))
-        # Sessao nova no Hermes tambem -- sem RPC: a proxima mensagem cria.
+        # Sessao nova no Hypria tambem -- sem RPC: a proxima mensagem cria.
         reset = getattr(self.registry, "reset_session", None)
         if callable(reset):
             reset()
@@ -3469,17 +3630,17 @@ class Sidebar(Gtk.ApplicationWindow):
                 if not alvo:
                     self._add_interface("Use `/historico abrir <n|id>`.")
                 else:
-                    self._abrir_sessao_hermes(alvo)
+                    self._abrir_sessao_hypria(alvo)
                 return True
             if not callable(listar):
-                self._add_interface("Historico do Hermes indisponivel.")
+                self._add_interface("Historico do Hypria indisponivel.")
                 return True
 
             def feito(sessoes):
-                self._mostrar_sessoes_hermes(sessoes)
+                self._mostrar_sessoes_hypria(sessoes)
 
-            self.show_banner("Buscando conversas no Hermes...", 2000)
-            self._hermes_async(lambda: listar(30), on_ok=feito)
+            self.show_banner("Buscando conversas no Hypria...", 2000)
+            self._hypria_async(lambda: listar(30), on_ok=feito)
             return True
 
         if cmd in ("velocidade", "speed", "tps"):
@@ -3558,49 +3719,60 @@ class Sidebar(Gtk.ApplicationWindow):
             return True
 
         if cmd in ("agente", "agent"):
-            self._add_interface(
-                "## Modo agente\n\n"
-                "O agente agora **e** o backend: todo turno passa pelo "
-                "Hermes, que le arquivos, roda comandos e usa ferramentas "
-                "quando a pergunta pede.\n\n"
-                "O que altera o sistema aparece aqui na conversa e espera "
-                "voce clicar em **Permitir** ou **Negar** — nao ha mais o "
-                "que ligar ou desligar.")
+            ligado = self._agente_ligado()
+            if not args:
+                self._add_interface(
+                    "## Modo agente\n\n"
+                    "Agora: **%s**\n\n"
+                    "- `on` — o Hypria usa ferramentas (arquivos, comandos, "
+                    "web, memoria); o que altera o sistema pede a sua "
+                    "permissao inline\n"
+                    "- `off` — so conversa, sem ferramentas\n\n"
+                    "O botao de terminal ao lado do envio faz o mesmo."
+                    % ("ligado" if ligado else "desligado"))
+                return True
+            escolha = args[0].lower()
+            if escolha not in ("on", "off"):
+                self._add_interface("`%s` nao serve. Use `on` ou `off`."
+                                    % escolha)
+                return True
+            self._definir_modo_agente(escolha == "on")
             return True
 
         if cmd == "think":
-            validos = ("on", "off", "low", "medium", "high")
-            visivel = bool(self.config.get("hermes.show_thinking", True))
-            esforco = str(self.config.get("hermes.reasoning_effort", "") or "")
+            validos = ("on", "off") + _EFFORTS
+            visivel = bool(self.config.get("hypria.show_thinking", True))
+            esforco = str(self.config.get("hypria.reasoning_effort", "") or "")
             if not args:
                 self._add_interface(
                     "## Raciocinio\n\n"
                     "Rascunho na conversa: **%s**  ·  esforco: `%s`\n\n"
                     "- `on` / `off` - mostra ou esconde o rascunho do modelo\n"
-                    "- `low` / `medium` / `high` - esforco de raciocinio "
-                    "(vale a partir da **proxima** conversa)\n"
+                    "- `%s` - esforco de raciocinio (aplica na sessao "
+                    "atual; `padrao` volta ao padrao do Hypria)\n"
                     % ("visivel" if visivel else "escondido",
-                       esforco or "padrao"))
+                       esforco or "padrao",
+                       "` / `".join(_EFFORTS)))
                 return True
             escolha = args[0].lower()
-            if escolha not in validos:
+            if escolha in ("padrao", "default", "auto"):
+                escolha = ""
+            elif escolha not in validos:
                 self._add_interface("`%s` nao serve. Use: %s."
-                                    % (escolha, ", ".join("`%s`" % v for v in validos)))
+                                    % (escolha, ", ".join("`%s`" % v for v in
+                                                          validos)))
                 return True
             if escolha in ("on", "off"):
-                self.config.set("hermes.show_thinking", escolha == "on")
-                aviso = ("Raciocinio visivel" if escolha == "on"
-                         else "Raciocinio escondido")
-            else:
-                self.config.set("hermes.reasoning_effort", escolha)
-                aviso = ("Esforco de raciocinio: %s (vale na proxima conversa)"
-                         % escolha)
-            try:
-                self.config.save()
-            except Exception as exc:
-                _warn("config.save failed: %r" % (exc,))
-            self._sync_think_btn()
-            self.show_banner(aviso, 3500)
+                self.config.set("hypria.show_thinking", escolha == "on")
+                try:
+                    self.config.save()
+                except Exception as exc:
+                    _warn("config.save failed: %r" % (exc,))
+                self._sync_think_btn()
+                self.show_banner("Raciocinio visivel" if escolha == "on"
+                                 else "Raciocinio escondido", 3500)
+                return True
+            self._on_effort_escolhido(escolha)
             return True
 
         if cmd == "model":
@@ -3649,13 +3821,13 @@ class Sidebar(Gtk.ApplicationWindow):
                 self._add_interface("Unknown provider: `%s`." % pid)
                 return True
 
-            # model.save_key e uma RPC (o Hermes valida e recarrega a lista
+            # model.save_key e uma RPC (o Hypria valida e recarrega a lista
             # de modelos) -- fora do main loop.
             def feito(_r):
                 self._add_interface("API key stored for **%s**." % pid)
                 self.rescan_providers()
 
-            self._hermes_async(
+            self._hypria_async(
                 lambda: self.registry.set_api_key(pid, value), on_ok=feito,
                 on_err=lambda e: self._add_interface(
                     "Could not store the key: `%s`" % e))
@@ -3670,7 +3842,7 @@ class Sidebar(Gtk.ApplicationWindow):
             return True
 
         # Comando que o painel nao conhece: pode ser um comando nativo do
-        # Hermes (/memoria, /skills, /compact...). Vai para o gateway.
+        # Hypria (/memoria, /skills, /compact...). Vai para o gateway.
         executar = getattr(self.registry, "slash_exec", None)
         if callable(executar):
             comando = text
@@ -3712,16 +3884,16 @@ class Sidebar(Gtk.ApplicationWindow):
                         self._add_interface(aviso)
                     msg = str(resp.get("message") or "")
                     if msg:
-                        self._enviar_prompt_hermes(
+                        self._enviar_prompt_hypria(
                             msg, str(resp.get("display") or ""))
                         return
                 saida = str(resp.get("output") or "")
                 self._add_interface(saida.strip() or "_(sem saida)_")
 
-            self._hermes_async(
+            self._hypria_async(
                 lambda: executar(comando), on_ok=feito,
                 on_err=lambda e: self._add_interface(
-                    "`/%s` falhou no Hermes: `%s`\n\nTente `/help`." % (cmd, e)))
+                    "`/%s` falhou no Hypria: `%s`\n\nTente `/help`." % (cmd, e)))
             return True
 
         self._add_interface("Unknown command: `/%s`. Try `/help`." % cmd)
@@ -3762,17 +3934,17 @@ class Sidebar(Gtk.ApplicationWindow):
         # retry) — e o texto fica no input para o usuario tentar de novo.
         provider = self._provider_by_id(self.history.provider)
         if provider is None:
-            self.show_banner("No provider selected.", 0)
+            self.show_banner("Nenhum provedor selecionado.", 5000)
             return
         if not provider.available:
             self.show_banner(
-                "%s is unavailable: %s  —  store a key with  /key %s <value>"
-                % (provider.name, provider.hint or "no API key", provider.id),
-                timeout_ms=0,
+                "%s esta indisponivel: %s"
+                % (provider.name, provider.hint or "sem chave"),
+                6000,
             )
             return
         if not self.history.model:
-            self.show_banner("No model selected — use /model to pick one.", 0)
+            self.show_banner("Nenhum modelo — escolha um com /model.", 5000)
             return
 
         self._set_input_text("")
@@ -3784,10 +3956,10 @@ class Sidebar(Gtk.ApplicationWindow):
         self._stream_pendente = True
         GLib.idle_add(self._start_stream)
 
-    def _enviar_prompt_hermes(self, message, display=""):
+    def _enviar_prompt_hypria(self, message, display=""):
         """Turno cujo texto enviado difere do que aparece na conversa.
 
-        Comandos do Hermes que expandem para um prompt (skills, bundles,
+        Comandos do Hypria que expandem para um prompt (skills, bundles,
         /queue) mandam o scaffolding completo ao modelo; a conversa mostra
         a projecao curta.  O historico guarda o texto completo — e ele que
         vai no submit.
@@ -3803,7 +3975,7 @@ class Sidebar(Gtk.ApplicationWindow):
         GLib.idle_add(self._start_stream)
 
     def _system_prompt(self):
-        # O system prompt de verdade e do Hermes (~/.hermes/config.yaml);
+        # O system prompt de verdade e do Hypria (~/.hypr-ia/config.yaml);
         # este aqui so segue existindo para o contrato do stream_events.
         base = ""
         resolver = getattr(self.config, "system_prompt", None)
@@ -3870,8 +4042,8 @@ class Sidebar(Gtk.ApplicationWindow):
         cancel = self._make_cancel()
         self._cancel = cancel
 
-        # estado dos widgets estruturais deste turno (Hermes)
-        self._hermes_tools = {}
+        # estado dos widgets estruturais deste turno (Hypria)
+        self._hypria_tools = {}
         self._aprovacoes = {}
         self._clarifies = {}
 
@@ -3911,7 +4083,7 @@ class Sidebar(Gtk.ApplicationWindow):
                 if kind in ("tool_start", "tool_done", "approval",
                             "approval_expire", "clarify", "clarify_expire",
                             "status", "meta"):
-                    # Eventos estruturais do Hermes nao coalescem: cada um vai
+                    # Eventos estruturais do Hypria nao coalescem: cada um vai
                     # inteiro para o main loop, que descarrega o texto
                     # pendente antes para preservar a ordem na conversa.
                     GLib.idle_add(self._on_turn_event, seq, kind,
@@ -3983,7 +4155,7 @@ class Sidebar(Gtk.ApplicationWindow):
         return GLib.SOURCE_REMOVE
 
     # ------------------------------------------------------------------
-    # Eventos estruturais do turno (Hermes): ferramentas, aprovacao, status
+    # Eventos estruturais do turno (Hypria): ferramentas, aprovacao, status
     # ------------------------------------------------------------------
     @staticmethod
     def _tool_cmd_text(data):
@@ -4013,11 +4185,11 @@ class Sidebar(Gtk.ApplicationWindow):
                               titulo=str(data.get("name") or "tool"))
             tid = str(data.get("tool_id") or "")
             if tid:
-                self._hermes_tools[tid] = bloco
+                self._hypria_tools[tid] = bloco
             self._anexar_widget(bloco)
         elif kind == "tool_done":
             tid = str(data.get("tool_id") or "")
-            bloco = self._hermes_tools.pop(tid, None)
+            bloco = self._hypria_tools.pop(tid, None)
             if bloco is None:
                 # tool.start perdido (ex.: reconexao): cria ja completo
                 bloco = ToolBlock(self._tool_cmd_text(data), False, None,
@@ -4067,7 +4239,7 @@ class Sidebar(Gtk.ApplicationWindow):
             responder(texto, request_id, question_id)
 
     def _aplicar_session_info(self, info):
-        """session.info do Hermes: modelo/provedor correntes da sessao."""
+        """session.info do Hypria: modelo/provedor correntes da sessao."""
         modelo = str(info.get("model") or "")
         provedor = str(info.get("provider") or "")
         if modelo and (modelo != self.history.model
@@ -4075,8 +4247,8 @@ class Sidebar(Gtk.ApplicationWindow):
             self.history.set_model(provedor or self.history.provider, modelo)
             self._sync_selectors()
 
-    def _hermes_async(self, trabalho, on_ok=None, on_err=None):
-        """Roda uma RPC do Hermes fora do main loop; o resultado volta por
+    def _hypria_async(self, trabalho, on_ok=None, on_err=None):
+        """Roda uma RPC do Hypria fora do main loop; o resultado volta por
         idle_add.  Sem on_err, o erro vira um banner."""
         def _no_main(cb, valor):
             def run():
@@ -4091,21 +4263,21 @@ class Sidebar(Gtk.ApplicationWindow):
                 if on_err is not None:
                     _no_main(on_err, exc)
                 else:
-                    _no_main(lambda e: self.show_banner("Hermes: %s" % e, 8000),
+                    _no_main(lambda e: self.show_banner("Hypria: %s" % e, 8000),
                              exc)
                 return
             if on_ok is not None:
                 _no_main(on_ok, resultado)
 
-        threading.Thread(target=run, name="hyde-ai-hermes-rpc",
+        threading.Thread(target=run, name="hyde-ai-hypria-rpc",
                          daemon=True).start()
 
-    def _carregar_comandos_hermes(self):
-        """Puxa o catalogo de slash commands do Hermes para a paleta.
+    def _carregar_comandos_hypria(self):
+        """Puxa o catalogo de slash commands do Hypria para a paleta.
 
         Uma vez por vida do gateway basta; comandos locais tem precedencia
         (a paleta concatena COMANDOS primeiro)."""
-        if getattr(self, "_comandos_hermes", None):
+        if getattr(self, "_comandos_hypria", None):
             return
         catalogo_fn = getattr(self.registry, "commands_catalog", None)
         if not callable(catalogo_fn):
@@ -4125,21 +4297,21 @@ class Sidebar(Gtk.ApplicationWindow):
                 if nome in locais or nome in vistos:
                     continue
                 vistos.add(nome)
-                resultado.append((nome, "", "%s  · hermes" % descricao))
-            self._comandos_hermes = resultado
+                resultado.append((nome, "", "%s  · hypria" % descricao))
+            self._comandos_hypria = resultado
 
-        self._hermes_async(catalogo_fn, on_ok=feito,
+        self._hypria_async(catalogo_fn, on_ok=feito,
                            on_err=lambda _e: None)
 
-    def _mostrar_sessoes_hermes(self, sessoes):
-        """Renderiza o session.list do Hermes e guarda a lista para o
+    def _mostrar_sessoes_hypria(self, sessoes):
+        """Renderiza o session.list do Hypria e guarda a lista para o
         `/historico abrir <n|id>`."""
-        self._sessoes_hermes = list(sessoes or [])
-        if not self._sessoes_hermes:
-            self._add_interface("Nenhuma conversa no Hermes ainda.")
+        self._sessoes_hypria = list(sessoes or [])
+        if not self._sessoes_hypria:
+            self._add_interface("Nenhuma conversa no Hypria ainda.")
             return
-        linhas = ["## Conversas no Hermes", ""]
-        for n, s in enumerate(self._sessoes_hermes, start=1):
+        linhas = ["## Conversas no Hypria", ""]
+        for n, s in enumerate(self._sessoes_hypria, start=1):
             titulo = str(s.get("title") or s.get("preview") or "(sem titulo)")
             # started_at e epoch Unix (float); ISO fica como fallback
             bruto = s.get("started_at")
@@ -4155,9 +4327,9 @@ class Sidebar(Gtk.ApplicationWindow):
         linhas += ["", "Abra com `/historico abrir <n>` (ou o inicio do id)."]
         self._add_interface("\n".join(linhas))
 
-    def _abrir_sessao_hermes(self, alvo):
+    def _abrir_sessao_hypria(self, alvo):
         """Resolve <n|id> contra a ultima listagem e faz o resume."""
-        sessoes = getattr(self, "_sessoes_hermes", [])
+        sessoes = getattr(self, "_sessoes_hypria", [])
         stored = None
         if alvo.isdigit() and 1 <= int(alvo) <= len(sessoes):
             stored = str(sessoes[int(alvo) - 1].get("id") or "")
@@ -4188,10 +4360,10 @@ class Sidebar(Gtk.ApplicationWindow):
             self._reconstruir_do_resume(resp)
 
         self.show_banner("Abrindo a conversa...", 2000)
-        self._hermes_async(trabalho, on_ok=feito)
+        self._hypria_async(trabalho, on_ok=feito)
 
     def _reconstruir_do_resume(self, resp):
-        """Conversa antiga do Hermes vira a conversa atual do cache local."""
+        """Conversa antiga do Hypria vira a conversa atual do cache local."""
         mensagens = list((resp or {}).get("messages") or [])
         info = (resp or {}).get("info") or {}
         try:
@@ -4214,7 +4386,7 @@ class Sidebar(Gtk.ApplicationWindow):
                 self.history.current["titulo"] = titulo
             except Exception:
                 pass
-        vincular = getattr(self.history, "set_hermes_session", None)
+        vincular = getattr(self.history, "set_hypria_session", None)
         if callable(vincular):
             vincular((resp or {}).get("session_key")
                      or getattr(self.registry, "stored_session_id", ""))
@@ -4226,8 +4398,8 @@ class Sidebar(Gtk.ApplicationWindow):
         self.show_banner("Conversa aberta — a proxima mensagem continua dela.",
                          3500)
 
-    def _on_hermes_background(self, params):
-        """Eventos do Hermes fora de um turno.  Roda no main loop."""
+    def _on_hypria_background(self, params):
+        """Eventos do Hypria fora de um turno.  Roda no main loop."""
         tipo = str(params.get("type") or "")
         payload = params.get("payload") or {}
         if tipo == "session.title":
@@ -4242,10 +4414,10 @@ class Sidebar(Gtk.ApplicationWindow):
             if texto:
                 self.show_banner(texto, int(payload.get("ttl_ms") or 6000))
         elif tipo == "gateway.died":
-            self.show_banner("O backend Hermes caiu — tentando de novo...", 0)
-            self._status_label.set_text("hermes fora do ar")
+            self.show_banner("O backend Hypria caiu — tentando de novo...", 0)
+            self._status_label.set_text("hypria fora do ar")
         elif tipo == "gateway.restarted":
-            self.show_banner("Backend Hermes de volta.", 3000)
+            self.show_banner("Backend Hypria de volta.", 3000)
             self.rescan_providers()
         elif tipo == "session.info":
             self._aplicar_session_info(payload)
@@ -4329,18 +4501,18 @@ class Sidebar(Gtk.ApplicationWindow):
                 except Exception:
                     pass
         self._clarifies = {}
-        self._hermes_tools = {}
+        self._hypria_tools = {}
 
         self._send_btn.set_icon_name("go-up-symbolic")
         self._send_btn.set_tooltip_text("Send (Enter)")
         self._send_btn.remove_css_class("stop-btn")
         self._status_label.set_text(self.history.model or "")
         self._update_send_state()
-        # Vincula a conversa local a sessao do Hermes (chave duravel), para
+        # Vincula a conversa local a sessao do Hypria (chave duravel), para
         # o restore continuar de onde parou.
         vinculo = getattr(self.registry, "stored_session_id", None)
-        if vinculo and hasattr(self.history, "set_hermes_session"):
-            self.history.set_hermes_session(vinculo)
+        if vinculo and hasattr(self.history, "set_hypria_session"):
+            self.history.set_hypria_session(vinculo)
         try:
             self.history.save()
         except Exception as exc:
@@ -4381,7 +4553,7 @@ class Sidebar(Gtk.ApplicationWindow):
                 except Exception:
                     pass
         self._clarifies = {}
-        self._hermes_tools = {}
+        self._hypria_tools = {}
         self._send_btn.set_icon_name("go-up-symbolic")
         self._send_btn.set_tooltip_text("Send (Enter)")
         self._send_btn.remove_css_class("stop-btn")

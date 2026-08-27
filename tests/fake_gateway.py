@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gateway falso do Hermes para testes do hermes_client.
+"""Gateway falso do Hypria para testes do hypria_client.
 
 Fala o mesmo protocolo do ``tui_gateway.entry`` real: JSON-RPC por linha,
 ``gateway.ready`` como primeiro frame, eventos como notificacoes com

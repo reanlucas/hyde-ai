@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Testes do lib/hermes_registry.py (adapter) contra o fake_gateway.
+"""Testes do lib/hypria_registry.py (adapter) contra o fake_gateway.
 
 Sem GTK: valida o contrato que o sidebar consome — lista de providers,
 stream_events com a tabela de traducao (tool/approval/interim/erro) e a
@@ -13,8 +13,8 @@ import threading
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(RAIZ, "lib"))
 
-from hermes_client import HermesClient, HermesError  # noqa: E402
-from hermes_registry import HermesRegistry, HermesCancel  # noqa: E402
+from hypria_client import HypriaClient, HypriaError  # noqa: E402
+from hypria_registry import HypriaRegistry, HypriaCancel  # noqa: E402
 
 SHIM = os.path.join(RAIZ, "tests", "shim")
 
@@ -36,7 +36,7 @@ class ConfigFalso(object):
     """Config minimo com a API pontilhada que o registry usa."""
 
     def __init__(self):
-        self.dados = {"hermes.show_thinking": True}
+        self.dados = {"hypria.show_thinking": True}
 
     def get(self, chave, padrao=None):
         return self.dados.get(chave, padrao)
@@ -49,18 +49,18 @@ class ConfigFalso(object):
 
 
 def registry_novo(modos=""):
-    cli = HermesClient(python=sys.executable, cwd=SHIM,
+    cli = HypriaClient(python=sys.executable, cwd=SHIM,
                        extra_env={"FAKE_GATEWAY_ARGS": modos},
                        auto_restart=False, spawn_timeout=10.0)
-    return HermesRegistry(cli, ConfigFalso())
+    return HypriaRegistry(cli, ConfigFalso())
 
 
 # -- 1. refresh + inventario de providers -------------------------------
 reg = registry_novo()
 try:
     antes = reg.list_providers()
-    caso("antes do refresh: linha unica Hermes indisponivel",
-         len(antes) == 1 and antes[0].id == "hermes" and not antes[0].available)
+    caso("antes do refresh: linha unica Hypria indisponivel",
+         len(antes) == 1 and antes[0].id == "hypria" and not antes[0].available)
     pronto = threading.Event()
     reg.refresh_async(pronto.set)
     caso("refresh_async termina", pronto.wait(15.0))
@@ -98,7 +98,7 @@ try:
     aviso = reg.set_model("fake/answer-1", "fake")
     caso("set_model devolve warning vazio", aviso == "", repr(aviso))
     caso("set_model persiste sticky",
-         reg._config.get("hermes.model") == "fake/answer-1")
+         reg._config.get("hypria.model") == "fake/answer-1")
 
     # -- 4. slash passthrough --------------------------------------------
     saida = reg.slash_exec("/memoria")
@@ -145,9 +145,9 @@ try:
                                                    "content": "oi"}],
                                      "", reg.new_cancel()):
             pass
-        caso("crash: gerador levanta HermesError", False)
-    except HermesError:
-        caso("crash: gerador levanta HermesError", True)
+        caso("crash: gerador levanta HypriaError", False)
+    except HypriaError:
+        caso("crash: gerador levanta HypriaError", True)
 finally:
     reg.close()
 
@@ -205,7 +205,7 @@ finally:
 
 # -- 10. token de cancelamento ------------------------------------------
 chamado = []
-tok = HermesCancel(lambda: chamado.append(1))
+tok = HypriaCancel(lambda: chamado.append(1))
 caso("cancel: comeca limpo", not tok.cancelled and not tok.is_set())
 tok.cancel()
 caso("cancel: seta flag e dispara interrupt uma vez",

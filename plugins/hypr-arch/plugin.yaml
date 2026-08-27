@@ -1,0 +1,9 @@
+name: hypr-arch
+version: 1.0.0
+description: "Ferramentas Hyprland + Arch Linux para o hypr-ia: consulta e controle do window manager (hyprctl), consulta de pacotes (pacman) e saude do sistema. Instalado pelo hyde-ai em ~/.hypr-ia/plugins."
+author: "hyde-ai"
+provides_tools:
+  - hypr_info
+  - hypr_ctl
+  - pacman_info
+  - arch_system

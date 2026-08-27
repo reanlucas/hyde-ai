@@ -8,7 +8,7 @@ GTK4 with layer-shell, coloured by
 [HyDE](https://github.com/HyDE-Project/HyDE)'s wallbash.
 
 The frontend is this panel; the backend is 100%
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) — its models,
+[Hypr-IA](https://github.com/NousResearch/hermes-agent) (a local base forked from Nous Research's hermes-agent) — its models,
 its 90+ tools, its agent loop, its memory and sessions — running as a
 separate process and streaming over JSON-RPC.
 
@@ -21,9 +21,9 @@ separate process and streaming over JSON-RPC.
 > edges, the API changes without notice and there are untested paths. If you
 > try it, expect breakage — and don't rely on it for anything that matters.
 >
-> **Every turn is agentic**: Hermes can read files, run commands and use the
+> **Every turn is agentic**: Hypr-IA can read files, run commands and use the
 > web to answer. Anything that changes the system asks for your permission
-> inline, but the permission gate is Hermes's — review what you approve.
+> inline, but the permission gate is Hypr-IA's — review what you approve.
 
 ---
 
@@ -85,28 +85,28 @@ cd hyde-ai
 The installer resolves the dependencies, copies the files, renders the theme
 colours and runs a diagnostic at the end. It is idempotent.
 
-### 3. Point it at Hermes
+### 3. Point it at Hypr-IA
 
 The installer clones nothing: it expects a
-[hermes-agent](https://github.com/NousResearch/hermes-agent) checkout
-(default `~/Projetos/hermes-agent`, override with `HYDE_AI_HERMES_DIR`) and
+[hypr-ia](https://github.com/NousResearch/hermes-agent) checkout (the hermes-agent base)
+(default `~/Projetos/hypr-ia`, override with `HYDE_AI_HYPRIA_DIR`) and
 builds its venv with [uv](https://github.com/astral-sh/uv) — the system
-Python cannot run Hermes (it needs `>=3.11,<3.14`), so uv fetches a managed
-3.11 into `hermes-agent/.venv`.
+Python cannot run Hypr-IA (it needs `>=3.11,<3.14`), so uv fetches a managed
+3.11 into `hypr-ia/.venv`.
 
 ```bash
 hyde-ai --setup      # confirms the paths and pings the real gateway
 hyde-ai --doctor     # full report, including a live gateway check
 ```
 
-API keys and the default model belong to Hermes now: set keys from the panel
-with `/key <provider> <value>` (they land in `~/.hermes/.env`) and the model
-with `/model`, or edit `~/.hermes/config.yaml`.
+API keys and the default model belong to Hypr-IA now: set keys from the panel
+with `/key <provider> <value>` (they land in `~/.hypr-ia/.env`) and the model
+with `/model`, or edit `~/.hypr-ia/config.yaml`.
 
-**Local models via Ollama** work through Hermes's `custom` provider:
+**Local models via Ollama** work through Hypr-IA's `custom` provider:
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.hypr-ia/config.yaml
 model:
   default: "qwen3.5:9b"
   provider: "ollama"
@@ -145,17 +145,17 @@ write.
 
 | Command | What it does |
 |---|---|
-| `/clear` | new conversation (a fresh Hermes session) |
-| `/historico` | conversations saved in Hermes · `/historico abrir <n\|id>` resumes one |
-| `/provider` `/model` | switch provider or model (Hermes inventory) |
-| `/key <provider> <value>` | store an API key in Hermes (`~/.hermes/.env`) |
+| `/clear` | new conversation (a fresh Hypr-IA session) |
+| `/historico` | conversations saved in Hypr-IA · `/historico abrir <n\|id>` resumes one |
+| `/provider` `/model` | switch provider or model (Hypr-IA inventory) |
+| `/key <provider> <value>` | store an API key in Hypr-IA (`~/.hypr-ia/.env`) |
 | `/speed` | average tokens/s per model |
-| `/refresh` | re-probe the Hermes inventory |
+| `/refresh` | re-probe the Hypr-IA inventory |
 | `/think on\|off\|low\|medium\|high` | show the reasoning draft / effort |
 | `/side left\|right` · `/width 35` | panel geometry |
 
-Any other `/command` is forwarded to Hermes itself — `/memoria`, `/skills`
-and the rest of its catalogue autocomplete in the palette, tagged `hermes`.
+Any other `/command` is forwarded to Hypr-IA itself — `/memoria`, `/skills`
+and the rest of its catalogue autocomplete in the palette, tagged `hypria`.
 
 From the shell, `hyde-ai --ask "your question"` opens the panel and sends the
 question straight through — handy on a keybind or from a script.
@@ -185,10 +185,12 @@ The metrics are stored with the message, so they travel with the conversation.
 
 ## Reasoning models
 
-Models with *thinking* produce a draft before the answer. The button next to
-send shows or hides that draft in the conversation; `/think low|medium|high`
-sets the reasoning effort Hermes asks for (it applies from the next
-conversation on).
+Models with *thinking* produce a draft before the answer. The sun button
+next to send shows or hides that draft in the conversation; the effort
+selector beside it (or `/think none…ultra`) changes the reasoning effort of
+the **current** session, live. A terminal button toggles **agent mode**: on,
+Hypr-IA uses its tools (files, commands, web, memory); off, the turn is a
+plain conversation — `/agente on|off` does the same.
 
 With the draft visible, the header pulses **Pensando…** while the model works
 and becomes **Pensou por 36s** when it finishes — clickable, with the whole
@@ -196,10 +198,9 @@ draft inside.
 
 ---
 
-## The agent is Hermes
+## The agent is Hypr-IA
 
-Every turn goes through [Hermes
-Agent](https://github.com/NousResearch/hermes-agent)'s own loop: terminal,
+Every turn goes through [Hypr-IA](https://github.com/NousResearch/hermes-agent) (base: hermes-agent)'s own loop: terminal,
 files, web search, browser, memory, skills, subagents — 90+ tools, executed
 server-side in its process. The panel renders what happens as it happens:
 
@@ -213,9 +214,9 @@ The GPU path moved from card1 to card2 after the last boot,
 so the collector can no longer find the sensor.
 ```
 
-When Hermes wants to run something its own safety layer classifies as
+When Hypr-IA wants to run something its own safety layer classifies as
 dangerous, the panel shows an approval card with the exact command and the
-choices Hermes offers — **Permitir**, **Sempre nesta sessão**, **Sempre**,
+choices Hypr-IA offers — **Permitir**, **Sempre nesta sessão**, **Sempre**,
 **Negar**:
 
 ```
@@ -223,7 +224,7 @@ choices Hermes offers — **Permitir**, **Sempre nesta sessão**, **Sempre**,
                 [ Negar ] [ Sempre ] [ Sempre nesta sessão ] [ Permitir ]
 ```
 
-The agent stays parked until you click. A refusal is not a dead end — Hermes
+The agent stays parked until you click. A refusal is not a dead end — Hypr-IA
 receives it and explains or proposes another way. Mid-turn questions from the
 agent (clarify) appear the same way, with an inline answer field. `sudo` and
 secret prompts are auto-denied — the sidebar has no password UI, on purpose.
@@ -231,7 +232,7 @@ secret prompts are auto-denied — the sidebar has no password UI, on purpose.
 The protocol layer has its own test harness, no GTK required:
 
 ```bash
-python3 tests/test_hermes_client.py   # transport: 18 cases against a fake gateway
+python3 tests/test_hypria_client.py   # transport: 18 cases against a fake gateway
 python3 tests/test_registry.py        # adapter: 21 cases, full event table
 ```
 
@@ -239,10 +240,10 @@ python3 tests/test_registry.py        # adapter: 21 cases, full event table
 
 ## History
 
-`/clear` starts a fresh Hermes session; the transcript of every conversation
-lives in Hermes's SQLite (`~/.hermes/state.db`). `/historico` lists them and
+`/clear` starts a fresh Hypr-IA session; the transcript of every conversation
+lives in Hypr-IA's SQLite (`~/.hypr-ia/state.db`). `/historico` lists them and
 `/historico abrir <n>` resumes one — the next message continues that session,
-with Hermes's full context. The header button keeps the local display cache
+with Hypr-IA's full context. The header button keeps the local display cache
 (40 conversations) for instant restore.
 
 ---

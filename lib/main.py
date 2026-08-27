@@ -3,7 +3,7 @@
 """
 hyde-ai :: application entrypoint.
 
-Wires together ``config.py`` (settings), ``hermes_registry.py`` (the Hermes
+Wires together ``config.py`` (settings), ``hypria_registry.py`` (the Hypria
 gateway backend) and ``sidebar.py`` (the GTK4 layer-shell UI), and implements
 the single-instance toggle semantics.
 
@@ -22,7 +22,7 @@ The same verbs are exported as GActions, so they also work over D-Bus:
     gapplication action dev.hyde.HydeAi toggle
 
 Everything here is defensive about its collaborators: if ``config.py`` or the
-Hermes backend is missing or unusable, the app still starts and says so in the
+Hypria backend is missing or unusable, the app still starts and says so in the
 UI rather than dying with a traceback.
 """
 
@@ -181,7 +181,7 @@ class _JsonConfig(object):
     """Dotted-key JSON store used when ``config.py`` is unavailable.
 
     It mirrors ``config.Config``'s surface (``get`` / ``set`` / ``save``)
-    so the Hermes backend and the sidebar accept it unchanged.
+    so the Hypria backend and the sidebar accept it unchanged.
     """
 
     def __init__(self, path=CONFIG_PATH):
@@ -400,7 +400,7 @@ def build_config():
 
 
 class EmptyRegistry(object):
-    """Stand-in used when the Hermes backend cannot be constructed."""
+    """Stand-in used when the Hypria backend cannot be constructed."""
 
     def __init__(self, reason):
         self.reason = reason
@@ -442,16 +442,16 @@ class EmptyRegistry(object):
 
 
 def build_registry(config):
-    """O backend agora e 100% Hermes: gateway em processo separado.
+    """O backend agora e 100% Hypria: gateway em processo separado.
 
     A construcao nao spawna nada -- o gateway sobe no primeiro
     ``refresh_async`` (chamado em do_startup), fora do main loop.
     """
     try:
-        import hermes_registry
-        return hermes_registry.HermesRegistry.from_config(config)
+        import hypria_registry
+        return hypria_registry.HypriaRegistry.from_config(config)
     except Exception as exc:
-        reason = "backend Hermes indisponivel (%s)" % exc
+        reason = "backend Hypria indisponivel (%s)" % exc
         _warn(reason)
         return EmptyRegistry(reason)
 
@@ -676,15 +676,15 @@ class History(object):
             model or current.get("model", ""),
         )
 
-    # -- vinculo com a sessao do Hermes ----------------------------------
-    # O transcript de verdade mora no SQLite do Hermes; o cache local guarda
+    # -- vinculo com a sessao do Hypria ----------------------------------
+    # O transcript de verdade mora no SQLite do Hypria; o cache local guarda
     # a chave duravel da sessao para a conversa poder continuar de onde
     # parou depois de um restore ou restart.
-    def set_hermes_session(self, stored_id):
-        self.current["hermes_session"] = str(stored_id or "")
+    def set_hypria_session(self, stored_id):
+        self.current["hypria_session"] = str(stored_id or "")
 
-    def hermes_session(self):
-        return str(self.current.get("hermes_session") or "")
+    def hypria_session(self):
+        return str(self.current.get("hypria_session") or "")
 
 
 # ==========================================================================
@@ -806,7 +806,7 @@ class HydeAiApplication(Adw.Application):
                 try:
                     closer()
                 except Exception as exc:
-                    _warn("hermes close failed: %r" % (exc,))
+                    _warn("hypria close failed: %r" % (exc,))
         if self.history is not None:
             try:
                 self.history.save()

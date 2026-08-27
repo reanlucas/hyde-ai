@@ -4,8 +4,8 @@ hyde-ai :: configuration
 
 Load/save ``~/.config/hyde-ai/config.json``.
 
-The file holds panel geometry and backend paths — API keys live with Hermes,
-in ``~/.hermes/.env``.  Writes stay atomic and at mode 0600 (the file once
+The file holds panel geometry and backend paths — API keys live with Hypria,
+in ``~/.hypr-ia/.env``.  Writes stay atomic and at mode 0600 (the file once
 carried keys, and old copies on disk still may).  Only the standard library
 is used.
 
@@ -80,26 +80,28 @@ DEFAULT_SYSTEM_PROMPT = (
 
 DEFAULTS: Dict[str, Any] = {
     "version": 1,
-    # Backend: o gateway do Hermes (tui_gateway) num processo separado,
-    # com venv proprio -- o Python do sistema (3.14) nao roda o Hermes
+    # Backend: o gateway do Hypria (tui_gateway) num processo separado,
+    # com venv proprio -- o Python do sistema (3.14) nao roda o Hypria
     # (exige >=3.11,<3.14). Preenchido pelo install.sh / --setup.
-    "hermes": {
-        "python": "",              # python do venv do hermes-agent
-        "path": "",                # checkout do hermes-agent (cwd do gateway)
+    "hypria": {
+        "python": "",              # python do venv do hypr-ia
+        "path": "",                # checkout do hypr-ia (cwd do gateway)
         "transport": "stdio",      # "ws" reservado para o futuro
         "model": "",               # escolha sticky passada ao session.create
         "provider": "",
-        "reasoning_effort": "",    # ""|low|medium|high (proxima sessao)
+        "reasoning_effort": "",    # ""|none|minimal|low|medium|high|xhigh|max|ultra
         "show_thinking": True,
+        "agent_mode": True,        # False = toolsets desligados (so conversa)
+        "toolsets_antes": [],      # snapshot p/ religar so o que estava ligado
         "spawn_timeout": 20.0,
         "request_timeout": 30.0,
         "restart_backoff": [0.5, 2.0, 5.0],
         "session_source": "hyde-ai",
     },
-    # Which provider/model the UI opens with (slugs do inventario do Hermes;
-    # vazio deixa o Hermes escolher). As chaves de API moram no ~/.hermes/.env.
+    # Which provider/model the UI opens with (slugs do inventario do Hypria;
+    # vazio deixa o Hypria escolher). As chaves de API moram no ~/.hypr-ia/.env.
     "provider": "",
-    # System prompt: o de verdade e do Hermes (~/.hermes/config.yaml); estes
+    # System prompt: o de verdade e do Hypria (~/.hypr-ia/config.yaml); estes
     # ficam so como artefato da interface e de configs antigas.
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
     "chat": {
@@ -336,6 +338,8 @@ def load(path: str = CONFIG_PATH) -> Config:
         cfg.load_error = "%s did not contain a JSON object; defaults loaded." % path
         return cfg
 
+    _migrar_hypria(parsed)
+
     # Repair the permissions of a config that was created by hand or by an
     # older version before this was enforced.
     try:
@@ -345,6 +349,29 @@ def load(path: str = CONFIG_PATH) -> Config:
         pass
 
     return Config(parsed, path=path)
+
+
+def _migrar_hypria(parsed: Dict[str, Any]) -> None:
+    """Migra in-place uma config da era "hermes" para "hypria".
+
+    O backend foi rebatizado de hermes-agent para hypr-ia: o bloco de
+    config mudou de nome e o checkout mudou de pasta. A migracao so vale
+    na memoria — o proximo save() a persiste — e nunca desfaz uma config
+    "hypria" ja existente.
+    """
+    if "hermes" in parsed and "hypria" not in parsed:
+        parsed["hypria"] = parsed.pop("hermes")
+    bloco = parsed.get("hypria")
+    if not isinstance(bloco, dict):
+        return
+    for chave in ("python", "path"):
+        valor = bloco.get(chave)
+        if not isinstance(valor, str) or "/hermes-agent" not in valor:
+            continue
+        novo = valor.replace("/hermes-agent", "/hypr-ia")
+        raiz = novo.split("/.venv/")[0] if "/.venv/" in novo else novo
+        if os.path.isdir(raiz) and not os.path.exists(valor):
+            bloco[chave] = novo
 
 
 def _detect_distro() -> str:

@@ -1,4 +1,4 @@
-"""Registry do hyde-ai servido pelo Hermes.
+"""Registry do hyde-ai servido pelo Hypria.
 
 Satisfaz o mesmo contrato que o antigo RegistryProxy/providers.py:
 
@@ -6,8 +6,8 @@ Satisfaz o mesmo contrato que o antigo RegistryProxy/providers.py:
     set_api_key(pid, v) / refresh_async(cb) / new_cancel()
     stream_events(pid, model_id, messages, system, cancel, tools=None)
 
-so que por baixo tudo vira JSON-RPC contra o gateway do Hermes via
-``hermes_client``.  O Hermes e o dono do contexto e do loop agentico: o
+so que por baixo tudo vira JSON-RPC contra o gateway do Hypria via
+``hypria_client``.  O Hypria e o dono do contexto e do loop agentico: o
 ``stream_events`` manda apenas o texto da ultima mensagem do usuario
 (``prompt.submit``) e traduz os eventos do gateway para os eventos
 duck-typed que o sidebar consome (``.kind``/``.text``/``.data``).
@@ -23,7 +23,7 @@ import queue
 import threading
 import time
 
-from hermes_client import HermesClient, HermesError, HermesRpcError
+from hypria_client import HypriaClient, HypriaError, HypriaRpcError
 
 _DRAIN_CAP_S = 10.0     # apos cancelar, drena eventos por no maximo isto
 
@@ -57,7 +57,7 @@ class ModelInfo(object):
         self.description = description or ""
 
 
-class HermesCancel(object):
+class HypriaCancel(object):
     """Token de cancelamento: seta a flag local e dispara session.interrupt."""
 
     def __init__(self, on_cancel=None):
@@ -102,7 +102,7 @@ def _ultimo_texto_user(messages):
     return ""
 
 
-class HermesRegistry(object):
+class HypriaRegistry(object):
 
     def __init__(self, client, config):
         self._client = client
@@ -122,7 +122,7 @@ class HermesRegistry(object):
 
     @classmethod
     def from_config(cls, config):
-        return cls(HermesClient.from_config(config), config)
+        return cls(HypriaClient.from_config(config), config)
 
     # -- ciclo de vida ---------------------------------------------------
 
@@ -137,7 +137,7 @@ class HermesRegistry(object):
                     self._client.start()
                 self._started = True
                 self._start_error = ""
-            except HermesError as exc:
+            except HypriaError as exc:
                 self._start_error = str(exc)
                 raise
 
@@ -197,7 +197,7 @@ class HermesRegistry(object):
             try:
                 resp = self._client.request("session.resume",
                                             {"session_id": stored})
-            except HermesError:
+            except HypriaError:
                 pass                    # sessao sumiu: cria uma nova
             if resp is not None:
                 with self._session_lock:
@@ -208,10 +208,10 @@ class HermesRegistry(object):
                 return self.ensure_session()
 
         params = {"cols": 120, "source": str(self._config.get(
-            "hermes.session_source", "hyde-ai") or "hyde-ai")}
-        model = str(self._config.get("hermes.model", "") or "")
-        provider = str(self._config.get("hermes.provider", "") or "")
-        effort = str(self._config.get("hermes.reasoning_effort", "") or "")
+            "hypria.session_source", "hyde-ai") or "hyde-ai")}
+        model = str(self._config.get("hypria.model", "") or "")
+        provider = str(self._config.get("hypria.provider", "") or "")
+        effort = str(self._config.get("hypria.reasoning_effort", "") or "")
         if model:
             params["model"] = model
         if provider:
@@ -231,7 +231,7 @@ class HermesRegistry(object):
         return self.ensure_session()
 
     def new_session(self):
-        """Comeca uma conversa nova no Hermes agora (RPC sincrona)."""
+        """Comeca uma conversa nova no Hypria agora (RPC sincrona)."""
         with self._session_lock:
             self._sid = None
             self._stored_id = None
@@ -281,7 +281,7 @@ class HermesRegistry(object):
 
     @property
     def inventory_loaded(self):
-        """True quando model.options ja chegou (a linha "Hermes" sintetica
+        """True quando model.options ja chegou (a linha "Hypria" sintetica
         pre-fetch nao deve virar modelo persistido no History)."""
         with self._options_lock:
             return self._options is not None
@@ -291,8 +291,8 @@ class HermesRegistry(object):
             options = self._options
         if not options:
             alive = self._client.alive()
-            hint = self._start_error or ("" if alive else "iniciando o Hermes...")
-            return [ProviderInfo("hermes", "Hermes", alive, hint,
+            hint = self._start_error or ("" if alive else "iniciando o Hypria...")
+            return [ProviderInfo("hypria", "Hypria", alive, hint,
                                  [ModelInfo(m) for m in
                                   ([options.get("model")] if options else [])
                                   if m])]
@@ -359,7 +359,7 @@ class HermesRegistry(object):
         return providers[0].id if providers else None
 
     def api_key(self, pid):
-        return ""                       # chaves moram no ~/.hermes/.env
+        return ""                       # chaves moram no ~/.hypr-ia/.env
 
     def set_api_key(self, pid, value):
         self.ensure_started()
@@ -388,7 +388,7 @@ class HermesRegistry(object):
     # -- controle do turno ------------------------------------------------
 
     def new_cancel(self):
-        return HermesCancel(self._interrupt_current)
+        return HypriaCancel(self._interrupt_current)
 
     # Leituras de self._sid abaixo sao atomicas sob o GIL; sem lock de
     # proposito — estes metodos rodam na thread do GTK e nunca podem
@@ -431,9 +431,9 @@ class HermesRegistry(object):
                 "config.set", dict(params, confirm_expensive_model=True))
             if not resp.get("warning"):
                 resp = resp2
-        self._config.set("hermes.model", model_id)
+        self._config.set("hypria.model", model_id)
         if provider_slug:
-            self._config.set("hermes.provider", provider_slug)
+            self._config.set("hypria.provider", provider_slug)
         try:
             self._config.save()
         except Exception:
@@ -446,8 +446,77 @@ class HermesRegistry(object):
                                      or self._options.get("provider"))
         return str(resp.get("warning") or "")
 
+    # -- modo agente / raciocinio ----------------------------------------
+
+    EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max",
+               "ultra")
+
+    def list_toolsets(self):
+        """[{name, description, tool_count, enabled}] direto do gateway."""
+        self.ensure_started()
+        params = {}
+        if self._sid:
+            params["session_id"] = self._sid
+        resp = self._client.request("toolsets.list", params)
+        return list(resp.get("toolsets") or [])
+
+    def agent_mode(self):
+        """Espelho local do modo agente (o gateway e a fonte da verdade)."""
+        return bool(self._config.get("hypria.agent_mode", True))
+
+    def set_agent_mode(self, ligado):
+        """Liga/desliga todos os toolsets do Hypria (RPC sincrona; worker).
+
+        Desligar guarda quais toolsets estavam ativos e desativa todos —
+        o turno vira conversa pura, sem ferramentas. Ligar reativa o que
+        estava ativo antes (ou tudo, se nao ha snapshot). O gateway
+        persiste no config.yaml e recria o agente da sessao na hora.
+        """
+        self.ensure_started()
+        itens = self.list_toolsets()
+        todos = [str(t.get("name") or "") for t in itens if t.get("name")]
+        ativos = [str(t.get("name")) for t in itens if t.get("enabled")]
+        params = {}
+        if self._sid:
+            params["session_id"] = self._sid
+        if ligado:
+            antes = [n for n in (self._config.get("hypria.toolsets_antes")
+                                 or []) if n in todos]
+            nomes = antes or todos
+        else:
+            if ativos:
+                self._config.set("hypria.toolsets_antes", ativos)
+            nomes = todos
+        if nomes:
+            self._client.request("tools.configure", dict(
+                params, action="enable" if ligado else "disable",
+                names=nomes))
+        self._config.set("hypria.agent_mode", bool(ligado))
+        try:
+            self._config.save()
+        except Exception:
+            pass
+        return bool(ligado)
+
+    def set_reasoning(self, esforco):
+        """Esforco de raciocinio, aplicado na sessao atual ao vivo.
+
+        "" limpa a escolha local: a sessao atual segue como esta e as
+        proximas usam o padrao do Hypria (config.set nao aceita vazio).
+        """
+        esforco = str(esforco or "").strip().lower()
+        if esforco:
+            sid = self.ensure_session()
+            self._client.request("config.set", {
+                "session_id": sid, "key": "reasoning", "value": esforco})
+        self._config.set("hypria.reasoning_effort", esforco)
+        try:
+            self._config.save()
+        except Exception:
+            pass
+
     def slash_exec(self, command):
-        """Executa um slash do Hermes; devolve um dict tipado.
+        """Executa um slash do Hypria; devolve um dict tipado.
 
         ``{"type": "output", "output": str}`` para texto simples;
         ``{"type": "send"|"skill", "message": str, "display": str}``
@@ -458,7 +527,7 @@ class HermesRegistry(object):
         try:
             resp = self._client.request("slash.exec", {"session_id": sid,
                                                        "command": command})
-        except HermesRpcError as exc:
+        except HypriaRpcError as exc:
             if exc.code != 4018:
                 raise
             # slash.exec recusa comandos que mudam estado (skills,
@@ -492,7 +561,7 @@ class HermesRegistry(object):
     def stream_events(self, pid, model_id, messages, system, cancel, tools=None):
         texto = _ultimo_texto_user(messages)
         if not texto.strip():
-            raise HermesError("mensagem vazia")
+            raise HypriaError("mensagem vazia")
         sid = self.ensure_session()
         fila = self._client.open_turn(sid)
         try:
@@ -513,7 +582,7 @@ class HermesRegistry(object):
 
     def _traduzir(self, sid, fila, cancel, pular_turno=False):
         """Gerador: eventos do gateway -> eventos duck-typed do sidebar."""
-        mostrar_think = bool(self._config.get("hermes.show_thinking", True))
+        mostrar_think = bool(self._config.get("hypria.show_thinking", True))
         viu_texto = False
         prazo_drenagem = None
         try:
@@ -545,8 +614,8 @@ class HermesRegistry(object):
                         # de verdade, nao o fim do turno velho.
                         if ev.get("synthetic") or \
                                 str(payload.get("status") or "") == "error":
-                            raise HermesError(str(payload.get("error")
-                                                  or "erro no Hermes"))
+                            raise HypriaError(str(payload.get("error")
+                                                  or "erro no Hypria"))
                         pular_turno = False
                         continue
                     if tipo not in ("approval.request", "approval.expire",
@@ -569,8 +638,8 @@ class HermesRegistry(object):
                         yield Event("text", str(payload.get("text") or ""))
                 elif tipo == "message.complete":
                     if str(payload.get("status") or "ok") == "error":
-                        raise HermesError(str(payload.get("error")
-                                              or "erro no Hermes"))
+                        raise HypriaError(str(payload.get("error")
+                                              or "erro no Hypria"))
                     if not viu_texto and payload.get("text"):
                         yield Event("text", str(payload["text"]))
                     dados = {"done_reason": payload.get("done_reason") or "stop"}

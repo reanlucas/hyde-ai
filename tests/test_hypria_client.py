@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Testes de protocolo do lib/hermes_client.py contra o fake_gateway.
+"""Testes de protocolo do lib/hypria_client.py contra o fake_gateway.
 
-Roda com `python3 tests/test_hermes_client.py`; imprime `N casos, M falhas`
+Roda com `python3 tests/test_hypria_client.py`; imprime `N casos, M falhas`
 e sai com 1 quando algo falha — mesmo estilo dos outros testes do repo.
 
-Com `--real` (ou HYDE_AI_HERMES_REAL=1) roda um smoke extra contra o
-gateway REAL do Hermes usando hermes.python/hermes.path do config.
+Com `--real` (ou HYDE_AI_HYPRIA_REAL=1) roda um smoke extra contra o
+gateway REAL do Hypria usando hypria.python/hypria.path do config.
 """
 
 import os
@@ -17,8 +17,8 @@ import time
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(RAIZ, "lib"))
 
-from hermes_client import (  # noqa: E402
-    HermesClient, HermesError, HermesTimeout, HermesGatewayDead, HermesRpcError,
+from hypria_client import (  # noqa: E402
+    HypriaClient, HypriaError, HypriaTimeout, HypriaGatewayDead, HypriaRpcError,
 )
 
 SHIM = os.path.join(RAIZ, "tests", "shim")
@@ -40,7 +40,7 @@ def caso(nome, cond, extra=""):
 def cliente(modos="", **kw):
     kw.setdefault("auto_restart", False)
     kw.setdefault("spawn_timeout", 10.0)
-    return HermesClient(
+    return HypriaClient(
         python=sys.executable, cwd=SHIM,
         extra_env={"FAKE_GATEWAY_ARGS": modos}, **kw)
 
@@ -81,9 +81,9 @@ caso("close: processo saiu com 0", c._proc is not None and c._proc.returncode ==
 c = cliente("--no-ready", spawn_timeout=1.0)
 try:
     c.start()
-    caso("timeout de ready levanta HermesError", False)
-except HermesError:
-    caso("timeout de ready levanta HermesError", True)
+    caso("timeout de ready levanta HypriaError", False)
+except HypriaError:
+    caso("timeout de ready levanta HypriaError", True)
 caso("timeout de ready mata o processo",
      c._proc is None or c._proc.poll() is not None)
 
@@ -114,9 +114,9 @@ try:
     c.start()
     try:
         c.request("model.options", {}, timeout=0.5)
-        caso("timeout de request levanta HermesTimeout", False)
-    except HermesTimeout:
-        caso("timeout de request levanta HermesTimeout", True)
+        caso("timeout de request levanta HypriaTimeout", False)
+    except HypriaTimeout:
+        caso("timeout de request levanta HypriaTimeout", True)
     time.sleep(3.0)                     # a resposta atrasada chega e e descartada
     r = c.request("ping", {})
     caso("resposta atrasada nao corrompe o canal", r.get("pong") is True)
@@ -129,9 +129,9 @@ try:
     c.start()
     try:
         c.request("metodo.inexistente", {})
-        caso("erro RPC levanta HermesRpcError", False)
-    except HermesRpcError as exc:
-        caso("erro RPC levanta HermesRpcError", exc.code == -32601, repr(exc.code))
+        caso("erro RPC levanta HypriaRpcError", False)
+    except HypriaRpcError as exc:
+        caso("erro RPC levanta HypriaRpcError", exc.code == -32601, repr(exc.code))
 finally:
     c.close()
 
@@ -184,7 +184,7 @@ try:
     try:
         c.request("ping", {})
         caso("crash: request depois da morte falha", False)
-    except (HermesGatewayDead, HermesTimeout):
+    except (HypriaGatewayDead, HypriaTimeout):
         caso("crash: request depois da morte falha", True)
 finally:
     c.close()
@@ -214,13 +214,13 @@ finally:
 print("%d casos, %d falhas" % (casos, falhas))
 
 # -- smoke opcional contra o gateway REAL -------------------------------
-if "--real" in sys.argv or os.environ.get("HYDE_AI_HERMES_REAL") == "1":
+if "--real" in sys.argv or os.environ.get("HYDE_AI_HYPRIA_REAL") == "1":
     sys.path.insert(0, os.path.join(RAIZ, "lib"))
     import config as config_mod
     cfg = config_mod.load()
-    py = cfg.get("hermes.python", "")
+    py = cfg.get("hypria.python", "")
     print("== smoke real: %s ==" % py)
-    real = HermesClient(python=py, cwd=cfg.get("hermes.path", "") or None,
+    real = HypriaClient(python=py, cwd=cfg.get("hypria.path", "") or None,
                         auto_restart=False)
     try:
         real.start(30.0)

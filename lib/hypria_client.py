@@ -1,14 +1,14 @@
-"""Cliente do gateway do Hermes (tui_gateway) por stdio.
+"""Cliente do gateway do Hypria (tui_gateway) por stdio.
 
 Fala JSON-RPC delimitado por newline com ``python -m tui_gateway.entry``,
-o mesmo protocolo que o TUI Ink e o desktop Electron do Hermes usam.
+o mesmo protocolo que o TUI Ink e o desktop Electron do Hypria usam.
 Puro stdlib e zero GTK: quem marshala para o main loop e o chamador.
 
 Modelo de threads:
-  - thread leitora (``hermes-reader``): stdout do gateway -> resolve Futures
+  - thread leitora (``hypria-reader``): stdout do gateway -> resolve Futures
     (frames com ``id``) ou roteia eventos para a fila do turno aberto /
     handler de background.
-  - thread de stderr: espelha com prefixo ``[hermes]`` e guarda as ultimas
+  - thread de stderr: espelha com prefixo ``[hypria]`` e guarda as ultimas
     linhas para diagnostico (``last_stderr``).
   - escritas no stdin serializadas por lock; qualquer thread pode chamar
     ``request``/``request_async``.
@@ -30,11 +30,11 @@ from collections import deque
 from concurrent.futures import Future
 
 
-class HermesError(Exception):
-    """Falha generica do backend Hermes."""
+class HypriaError(Exception):
+    """Falha generica do backend Hypria."""
 
 
-class HermesRpcError(HermesError):
+class HypriaRpcError(HypriaError):
     """Frame de erro JSON-RPC devolvido pelo gateway."""
 
     def __init__(self, code, message, data=None):
@@ -43,11 +43,11 @@ class HermesRpcError(HermesError):
         self.data = data
 
 
-class HermesTimeout(HermesError):
+class HypriaTimeout(HypriaError):
     """Request sem resposta dentro do prazo."""
 
 
-class HermesGatewayDead(HermesError):
+class HypriaGatewayDead(HypriaError):
     """O processo do gateway morreu com requests pendentes."""
 
 
@@ -93,6 +93,9 @@ class GatewayProcess(object):
     def spawn(self):
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
+        # O estado do backend (config.yaml, .env, state.db, plugins) mora em
+        # ~/.hypr-ia. O nome da variavel e o que o gateway upstream le.
+        env.setdefault("HERMES_HOME", os.path.expanduser("~/.hypr-ia"))
         env.update(self.extra_env)
         self.proc = subprocess.Popen(
             [self.python, "-m", "tui_gateway.entry"],
@@ -108,7 +111,7 @@ class GatewayProcess(object):
         return self.proc
 
 
-class HermesClient(object):
+class HypriaClient(object):
     """Transporte JSON-RPC + dono do ciclo de vida do processo."""
 
     def __init__(self, python, cwd=None, extra_env=None,
@@ -140,9 +143,9 @@ class HermesClient(object):
 
     @classmethod
     def from_config(cls, config):
-        """Constroi a partir do config do hyde-ai (chaves ``hermes.*``)."""
-        python = str(config.get("hermes.python", "") or "")
-        path = str(config.get("hermes.path", "") or "")
+        """Constroi a partir do config do hyde-ai (chaves ``hypria.*``)."""
+        python = str(config.get("hypria.python", "") or "")
+        path = str(config.get("hypria.path", "") or "")
         if not python and path:
             # Mesmo fallback do doctor/setup: o venv que o uv sync cria
             # dentro do checkout. Sem ele o doctor diria "ok" para um
@@ -153,10 +156,10 @@ class HermesClient(object):
         return cls(
             python=python,
             cwd=path or None,
-            spawn_timeout=float(config.get("hermes.spawn_timeout", 20.0) or 20.0),
-            request_timeout=float(config.get("hermes.request_timeout", _DEFAULT_TIMEOUT)
+            spawn_timeout=float(config.get("hypria.spawn_timeout", 20.0) or 20.0),
+            request_timeout=float(config.get("hypria.request_timeout", _DEFAULT_TIMEOUT)
                                   or _DEFAULT_TIMEOUT),
-            restart_backoff=list(config.get("hermes.restart_backoff", [0.5, 2.0, 5.0])
+            restart_backoff=list(config.get("hypria.restart_backoff", [0.5, 2.0, 5.0])
                                  or []),
         )
 
@@ -165,7 +168,7 @@ class HermesClient(object):
     def start(self, timeout=None):
         """Spawna o gateway e espera o ``gateway.ready`` + ``ping``.
 
-        Levanta ``HermesError`` com o rabo do stderr quando o gateway nao
+        Levanta ``HypriaError`` com o rabo do stderr quando o gateway nao
         sobe; nesse caso o processo ja foi morto.
         """
         with self._spawn_lock:
@@ -173,23 +176,23 @@ class HermesClient(object):
 
     def _start_locked(self, timeout=None):
         if not self._gateway.python:
-            raise HermesError("hermes.python nao configurado (rode hyde-ai --setup)")
+            raise HypriaError("hypria.python nao configurado (rode hyde-ai --setup)")
         timeout = self._spawn_timeout if timeout is None else timeout
         self._ready_evt.clear()
         try:
             self._proc = self._gateway.spawn()
         except OSError as exc:
-            raise HermesError("falha ao spawnar o gateway: %s" % exc)
+            raise HypriaError("falha ao spawnar o gateway: %s" % exc)
         self._start_io_threads()
         if not self._ready_evt.wait(timeout):
             self._kill_proc()
-            raise HermesError("gateway nao emitiu gateway.ready em %.0fs%s"
+            raise HypriaError("gateway nao emitiu gateway.ready em %.0fs%s"
                               % (timeout, self._stderr_hint()))
         try:
             self.request("ping", {}, timeout=5.0)
-        except HermesError as exc:
+        except HypriaError as exc:
             self._kill_proc()
-            raise HermesError("gateway subiu mas nao respondeu ping: %s%s"
+            raise HypriaError("gateway subiu mas nao respondeu ping: %s%s"
                               % (exc, self._stderr_hint()))
 
     def alive(self):
@@ -229,13 +232,13 @@ class HermesClient(object):
                 proc.wait(1.0)
             except subprocess.TimeoutExpired:
                 proc.kill()
-        self._fail_pending(HermesGatewayDead("gateway encerrado"))
+        self._fail_pending(HypriaGatewayDead("gateway encerrado"))
 
     # -- requests --------------------------------------------------------
 
     def request(self, method, params=None, timeout=None):
-        """RPC bloqueante, correlacionada por id.  Levanta HermesRpcError /
-        HermesTimeout / HermesGatewayDead."""
+        """RPC bloqueante, correlacionada por id.  Levanta HypriaRpcError /
+        HypriaTimeout / HypriaGatewayDead."""
         rid = self._next_id()
         fut = Future()
         with self._lock:
@@ -243,7 +246,7 @@ class HermesClient(object):
         try:
             self._write_frame({"jsonrpc": "2.0", "id": rid,
                                "method": method, "params": params or {}})
-        except HermesError:
+        except HypriaError:
             with self._lock:
                 self._pending.pop(rid, None)
             raise
@@ -252,7 +255,7 @@ class HermesClient(object):
         except TimeoutError:
             with self._lock:
                 self._pending.pop(rid, None)   # resposta atrasada sera descartada
-            raise HermesTimeout("%s sem resposta" % method)
+            raise HypriaTimeout("%s sem resposta" % method)
 
     def request_async(self, method, params=None, on_error=None):
         """RPC dispara-e-esquece (approval.respond, interrupt...).  ``on_error``
@@ -263,7 +266,7 @@ class HermesClient(object):
         try:
             self._write_frame({"jsonrpc": "2.0", "id": rid,
                                "method": method, "params": params or {}})
-        except HermesError as exc:
+        except HypriaError as exc:
             with self._lock:
                 self._pending.pop(rid, None)
             if on_error:
@@ -301,23 +304,23 @@ class HermesClient(object):
     def _write_frame(self, frame):
         proc = self._proc
         if proc is None or proc.poll() is not None or proc.stdin is None:
-            raise HermesGatewayDead("gateway fora do ar%s" % self._stderr_hint())
+            raise HypriaGatewayDead("gateway fora do ar%s" % self._stderr_hint())
         data = json.dumps(frame, ensure_ascii=False)
         with self._write_lock:
             try:
                 proc.stdin.write(data + "\n")
                 proc.stdin.flush()
             except (OSError, ValueError) as exc:
-                raise HermesGatewayDead("escrita no gateway falhou: %s" % exc)
+                raise HypriaGatewayDead("escrita no gateway falhou: %s" % exc)
 
     def _start_io_threads(self):
         self._reader_thread = threading.Thread(
             target=self._reader_loop, args=(self._proc,),
-            name="hermes-reader", daemon=True)
+            name="hypria-reader", daemon=True)
         self._reader_thread.start()
         self._stderr_thread = threading.Thread(
             target=self._stderr_loop, args=(self._proc,),
-            name="hermes-stderr", daemon=True)
+            name="hypria-stderr", daemon=True)
         self._stderr_thread.start()
 
     def _reader_loop(self, proc):
@@ -349,13 +352,13 @@ class HermesClient(object):
             err = frame.get("error")
             if isinstance(waiter, Future):
                 if err:
-                    waiter.set_exception(HermesRpcError(
+                    waiter.set_exception(HypriaRpcError(
                         err.get("code"), err.get("message"), err.get("data")))
                 else:
                     waiter.set_result(frame.get("result") or {})
             elif err:
                 try:
-                    waiter(HermesRpcError(err.get("code"), err.get("message"),
+                    waiter(HypriaRpcError(err.get("code"), err.get("message"),
                                           err.get("data")))
                 except Exception:
                     pass
@@ -394,7 +397,7 @@ class HermesClient(object):
     def _note_stderr(self, line):
         self._stderr_ring.append(line)
         try:
-            print("[hermes] %s" % line, file=sys.stderr, flush=True)
+            print("[hypria] %s" % line, file=sys.stderr, flush=True)
         except OSError:
             pass
 
@@ -420,14 +423,14 @@ class HermesClient(object):
         for sid, q in turns.items():
             q.put({"type": "message.complete", "session_id": sid,
                    "payload": {"status": "error",
-                               "error": "gateway do Hermes caiu (veja o log)"},
+                               "error": "gateway do Hypria caiu (veja o log)"},
                    "synthetic": True})
 
     def _on_process_exit(self):
         self._ready_evt.clear()
         if self._closing:
             return
-        self._fail_pending(HermesGatewayDead("gateway morreu%s" % self._stderr_hint()))
+        self._fail_pending(HypriaGatewayDead("gateway morreu%s" % self._stderr_hint()))
         self._notify_background({"type": "gateway.died", "session_id": "",
                                  "payload": {}, "synthetic": True})
         if self._auto_restart:
@@ -447,7 +450,7 @@ class HermesClient(object):
                 return
             self._respawning = True
         threading.Thread(target=self._respawn_loop,
-                         name="hermes-respawn", daemon=True).start()
+                         name="hypria-respawn", daemon=True).start()
 
     def _respawn_loop(self):
         with self._lock:
