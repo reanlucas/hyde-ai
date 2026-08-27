@@ -19,6 +19,7 @@ para o main loop e o sidebar.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -207,8 +208,13 @@ class HypriaRegistry(object):
                         return self._sid
                 return self.ensure_session()
 
-        params = {"cols": 120, "source": str(self._config.get(
-            "hypria.session_source", "hyde-ai") or "hyde-ai")}
+        # cwd explicito: sem ele a sessao nasce no cwd do gateway — o
+        # checkout do hypr-ia — e o AGENTS.md de ~95K chars do repo entra
+        # inteiro no system prompt (25k tokens de prefill por conversa).
+        params = {"cols": 120,
+                  "cwd": os.path.expanduser("~"),
+                  "source": str(self._config.get(
+                      "hypria.session_source", "hyde-ai") or "hyde-ai")}
         model = str(self._config.get("hypria.model", "") or "")
         provider = str(self._config.get("hypria.provider", "") or "")
         effort = str(self._config.get("hypria.reasoning_effort", "") or "")

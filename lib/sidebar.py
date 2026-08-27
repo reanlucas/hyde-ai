@@ -2792,8 +2792,9 @@ class Sidebar(Gtk.ApplicationWindow):
         atual = self._esforco_atual()
         btn.set_label(atual or "auto")
         btn.set_tooltip_text(
-            "Esforco de raciocinio: %s (clique para trocar; aplica na "
-            "sessao atual)" % (atual or "padrao do Hypria"))
+            "Esforco de raciocinio: %s (aplica na sessao atual). Nem todo "
+            "provedor repassa isso ao modelo — ollama local ignora; vale "
+            "para OpenRouter, Nous e afins." % (atual or "padrao do Hypria"))
         for valor, linha in getattr(self, "_effort_rows", {}).items():
             if valor == atual:
                 linha.add_css_class("effort-atual")
@@ -3749,7 +3750,10 @@ class Sidebar(Gtk.ApplicationWindow):
                     "Rascunho na conversa: **%s**  ·  esforco: `%s`\n\n"
                     "- `on` / `off` - mostra ou esconde o rascunho do modelo\n"
                     "- `%s` - esforco de raciocinio (aplica na sessao "
-                    "atual; `padrao` volta ao padrao do Hypria)\n"
+                    "atual; `padrao` volta ao padrao do Hypria)\n\n"
+                    "Nem todo provedor repassa o esforco ao modelo: o "
+                    "**ollama local ignora** (o qwen pensa pelo default "
+                    "dele); OpenRouter, Nous e afins aplicam.\n"
                     % ("visivel" if visivel else "escondido",
                        esforco or "padrao",
                        "` / `".join(_EFFORTS)))
