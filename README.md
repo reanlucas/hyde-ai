@@ -87,12 +87,16 @@ colours and runs a diagnostic at the end. It is idempotent.
 
 ### 3. Point it at Hypr-IA
 
-The installer clones nothing: it expects a
-[hypr-ia](https://github.com/NousResearch/hermes-agent) checkout (the hermes-agent base)
-(default `~/Projetos/hypr-ia`, override with `HYDE_AI_HYPRIA_DIR`) and
-builds its venv with [uv](https://github.com/astral-sh/uv) — the system
+The installer clones the upstream base when the
+[hypr-ia](https://github.com/NousResearch/hermes-agent) checkout is absent
+(default `~/Projetos/hypr-ia`, override with `HYDE_AI_HYPRIA_DIR`) and builds
+its venv with [uv](https://github.com/astral-sh/uv) — the system
 Python cannot run Hypr-IA (it needs `>=3.11,<3.14`), so uv fetches a managed
 3.11 into `hypr-ia/.venv`.
+
+Installation is strict by default: a missing backend, venv, theme stylesheet,
+plugin or failed diagnostic makes it exit non-zero. Set `HYDE_AI_STRICT=0`
+only to preserve the old best-effort behavior while diagnosing an installation.
 
 ```bash
 hyde-ai --setup      # confirms the paths and pings the real gateway

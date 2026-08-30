@@ -5,6 +5,18 @@ BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
 LIB="$HOME/.local/lib/hyde-ai"
 BIN="$HOME/.local/bin"
+# Uma instalacao concluida precisa ter backend, tema e diagnostico funcionais.
+# HYDE_AI_STRICT=0 mantem o comportamento tolerante antigo para manutencao.
+HYDE_AI_STRICT="${HYDE_AI_STRICT:-1}"
+
+exigir() {
+    local mensagem="$1"
+    if [ "$HYDE_AI_STRICT" = "1" ]; then
+        echo "    ERRO: $mensagem" >&2
+        exit 1
+    fi
+    echo "    AVISO: $mensagem" >&2
+}
 
 cat <<'AVISO'
 +---------------------------------------------------------------+
@@ -101,26 +113,28 @@ fi
 if [ ! -f "$HYPRIA_DIR/pyproject.toml" ]; then
     echo "    clonando a base do Hypr-IA em $HYPRIA_DIR"
     git clone --depth 1 https://github.com/NousResearch/hermes-agent "$HYPRIA_DIR" \
-        || echo "    AVISO: clone falhou -- clone manualmente (ou exporte" \
-                "HYDE_AI_HYPRIA_DIR) e rode o install.sh de novo"
+        || exigir "clone falhou -- defina HYDE_AI_HYPRIA_DIR ou rode novamente"
 fi
 if [ ! -f "$HYPRIA_DIR/pyproject.toml" ]; then
-    echo "    AVISO: sem o checkout do Hypr-IA o painel nao tem backend"
+    exigir "sem o checkout do Hypr-IA o painel nao tem backend"
 else
     if ! command -v uv &>/dev/null; then
         echo "    instalando uv (gerencia o venv e o Python 3.11 do backend)"
         sudo pacman -S --needed --noconfirm uv \
-            || echo "    AVISO: instale o uv manualmente e rode de novo"
+            || exigir "nao foi possivel instalar uv"
     fi
     if command -v uv &>/dev/null; then
         echo "    uv sync em $HYPRIA_DIR (a primeira vez demora)"
         (cd "$HYPRIA_DIR" && uv sync) \
-            || echo "    AVISO: uv sync falhou; rode-o manualmente"
+            || exigir "uv sync falhou"
+    else
+        exigir "uv nao esta disponivel"
     fi
     # hypria.path entra sempre que o checkout existe; hypria.python so com o
     # venv pronto (sem ele, from_config ainda acha .venv/bin/python depois).
     HPY="$HYPRIA_DIR/.venv/bin/python"
     [ -x "$HPY" ] || HPY=""
+    [ -n "$HPY" ] || exigir "venv do Hypr-IA nao foi criado por uv sync"
     if python3 - "$CFG/hyde-ai/config.json" "$HPY" "$HYPRIA_DIR" <<'PYEOF'
 import json, os, sys
 caminho, py, repo = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -151,8 +165,7 @@ PYEOF
                  "$HYPRIA_DIR e o install.sh de novo"
         fi
     else
-        echo "    AVISO: falhou gravar o config -- ajuste hypria.python e" \
-             "hypria.path em $CFG/hyde-ai/config.json" >&2
+        exigir "falhou gravar hypria.python e hypria.path no config"
     fi
 
     echo "==> Plugin hypr-arch (tools Hyprland + Arch)"
@@ -183,11 +196,10 @@ PYEOF
         then
             echo "    plugin instalado e ativado (toolsets hyprland + archlinux)"
         else
-            echo "    AVISO: nao ativei o plugin -- adicione 'hypr-arch' em" \
-                 "plugins.enabled no $HYPRIA_HOME/config.yaml" >&2
+            exigir "nao foi possivel ativar o plugin hypr-arch"
         fi
     else
-        echo "    plugin copiado; ative depois do uv sync rodando o install de novo"
+        exigir "plugin hypr-arch exige o venv do Hypr-IA"
     fi
 fi
 
@@ -206,18 +218,21 @@ if [ ! -s "$CSS" ] || ! grep -q "effort-btn" "$CSS" 2>/dev/null; then
         "$SWITCH" -s "$TEMA" >/dev/null 2>&1 || true
     fi
 fi
-[ -s "$CSS" ] && echo "    stylesheet em $CSS" \
-              || echo "    AVISO: stylesheet nao gerada -- troque de tema uma vez"
+if [ -s "$CSS" ]; then
+    echo "    stylesheet em $CSS"
+else
+    exigir "stylesheet nao gerada; aplique um tema HyDE e rode novamente"
+fi
 
 echo "==> Verificacao"
 saida="$("$BIN/hyde-ai" --doctor 2>&1)"; codigo=$?
 echo "$saida" | grep -E '\[ *(ok|warn|FAIL|--) *\]|problem' || true
 if [ "$codigo" -ne 0 ]; then
-    echo "    AVISO: o doctor achou problemas -- rode: hyde-ai --doctor"
+    exigir "o doctor encontrou problemas"
 fi
 
 if [ "$RODAVA" -eq 1 ]; then
     echo "==> Reiniciando o painel"
-    "$BIN/hyde-ai" --daemon >/dev/null 2>&1 || true
+    "$BIN/hyde-ai" --daemon >/dev/null 2>&1 || exigir "nao foi possivel reiniciar o painel"
 fi
 echo "==> Pronto.  hyde-ai --setup   para conferir o Hypr-IA e as chaves"
