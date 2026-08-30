@@ -235,4 +235,4 @@ if [ "$RODAVA" -eq 1 ]; then
     echo "==> Reiniciando o painel"
     "$BIN/hyde-ai" --daemon >/dev/null 2>&1 || exigir "nao foi possivel reiniciar o painel"
 fi
-echo "==> Pronto.  hyde-ai --setup   para conferir o Hypr-IA e as chaves"
+echo "==> Pronto.  hyde-ai --doctor  para conferir o Hypr-IA"

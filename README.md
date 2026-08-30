@@ -99,7 +99,7 @@ plugin or failed diagnostic makes it exit non-zero. Set `HYDE_AI_STRICT=0`
 only to preserve the old best-effort behavior while diagnosing an installation.
 
 ```bash
-hyde-ai --setup      # confirms the paths and pings the real gateway
+hyde-ai --setup      # repairs/confirms the venv path and pings the real gateway
 hyde-ai --doctor     # full report, including a live gateway check
 ```
 
@@ -107,7 +107,7 @@ API keys and the default model belong to Hypr-IA now: set keys from the panel
 with `/key <provider> <value>` (they land in `~/.hypr-ia/.env`) and the model
 with `/model`, or edit `~/.hypr-ia/config.yaml`.
 
-**Local models via Ollama** work through Hypr-IA's `custom` provider:
+**Local models via Ollama** work through Hypr-IA's Ollama provider:
 
 ```yaml
 # ~/.hypr-ia/config.yaml

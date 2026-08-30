@@ -1071,15 +1071,19 @@ def cmd_setup(args) -> int:
         print("  " + yellow("sem pyproject.toml em %s" % hdir))
         print("  " + dim("clone com: git clone "
                          "https://github.com/NousResearch/hermes-agent " + hdir))
-    hpy_padrao = os.path.join(hdir, ".venv", "bin", "python")
+    # O Hypr-IA exige seu proprio Python (<3.14). Este caminho nao e uma
+    # preferencia livre: `uv sync` cria exatamente este venv. Pedir um valor
+    # aqui permitia trocar acidentalmente um caminho valido por "python3" e
+    # quebrar uma instalacao que o doctor acabara de aprovar.
+    hpy_padrao = os.path.abspath(os.path.join(hdir, ".venv", "bin", "python"))
     hpy_atual = (cfg_get(config, "hypria.python", "") or "").strip()
-    hpy = ask("  python que roda o Hypria", hpy_atual or hpy_padrao)
-    hpy = os.path.expanduser(hpy)
-    if not os.path.exists(hpy):
+    hpy = hpy_padrao
+    if hpy_atual and os.path.abspath(os.path.expanduser(hpy_atual)) != hpy:
+        print("  " + yellow("ignorando hypria.python invalido: %s" % hpy_atual))
+    print("  python que roda o Hypria: " + green(hpy))
+    if not (os.path.isfile(hpy) and os.access(hpy, os.X_OK)):
         print("  " + yellow("esse python ainda nao existe (%s)" % hpy))
-        # so oferece o uv sync quando ele resolveria: checkout presente e
-        # o python pedido e exatamente o venv que o uv criaria
-        if os.path.isdir(hdir) and hpy == hpy_padrao:
+        if os.path.isdir(hdir):
             if shutil.which("uv"):
                 if ask_yes("  rodar `uv sync` agora? (baixa o Python 3.11 e "
                            "as dependencias)", default=True):
@@ -1089,6 +1093,9 @@ def cmd_setup(args) -> int:
             else:
                 print("  " + dim("instale o uv (sudo pacman -S uv) e rode "
                                  "`uv sync` em %s" % hdir))
+    if not (os.path.isfile(hpy) and os.access(hpy, os.X_OK)):
+        print("  " + red("o venv do Hypr-IA continua ausente; config nao alterada"))
+        return 1
     cfg_set(config, "hypria.path", hdir)
     cfg_set(config, "hypria.python", hpy)
     print("  hypria.path:   " + green(hdir))
@@ -1096,11 +1103,10 @@ def cmd_setup(args) -> int:
     print()
 
     # ---- teste real -------------------------------------------------------
-    if os.path.exists(hpy):
-        print(bold("Teste do gateway"))
-        ok, detalhe = check_hypria_gateway(hpy, hdir)
-        print("  " + (green(detalhe) if ok else red(detalhe)))
-        print()
+    print(bold("Teste do gateway"))
+    ok, detalhe = check_hypria_gateway(hpy, hdir)
+    print("  " + (green(detalhe) if ok else red(detalhe)))
+    print()
 
     # ---- chaves -----------------------------------------------------------
     print(bold("Chaves de API"))
@@ -1117,6 +1123,10 @@ def cmd_setup(args) -> int:
 
     write_config(config)
     print(green("Wrote %s" % CONFIG_FILE))
+
+    if not ok:
+        print(red("Hypr-IA nao passou no teste; veja o detalhe acima."))
+        return 1
 
     # ---- theming ----------------------------------------------------------
     if not os.path.exists(WALLBASH_CSS):
